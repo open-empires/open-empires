@@ -38,7 +38,10 @@
 - Immediate implementation phase: local browser prototype with no backend dependency.
 - Current prototype view/model: isometric tile terrain with grid outlines and non-walkable water tiles.
 - Current input model: click/drag multi-unit selection with shared right-click move commands.
+- Camera control model: arrow keys + window-edge mouse scrolling; reserve WASD for future hotkeys.
+- UI terminology: `game canvas` refers to the non-HUD gameplay render region.
 - Minimap input model: left click/drag on minimap pans camera focus.
+- Current HUD model: AoE-style bottom HUD with selection panels and integrated bottom-right minimap frame.
 - Current render model: terrain/grid pre-rendered to a cached layer and composited each frame for smoother camera movement.
 - Current camera model: tile-centered focus camera (screen center maps to a map tile position), clamped directly to valid tile coordinates.
 - Camera debug behavior: center pixel is rendered black and the tile containing that center focus is highlighted white.
@@ -55,7 +58,7 @@
 - Repository role: `open-empires` is the meta monorepo; product code currently lives under `packages/`.
 - `CONTEXT.md` and `AGENTS.md` live at the repo root as the agent policy/memory entrypoint.
 - `docs/prd.md` is the product source-of-truth.
-- Web client code is organized under `packages/open-empires-web/src/game/` modules (`iso`, `terrain`, `units`, `camera`, `minimap`) with `packages/open-empires-web/src/index.ts` as orchestrator.
+- Web client code is organized under `packages/open-empires-web/src/game/` modules (`iso`, `terrain`, `units`, `camera`, `minimap`, `hud`) with `packages/open-empires-web/src/index.ts` as orchestrator.
 
 ## Known Issues / Active Risks
 - Movement quality and collision deadlock handling at scale are not yet validated in implementation.
