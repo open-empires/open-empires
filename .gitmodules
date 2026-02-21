@@ -4,3 +4,6 @@
 [submodule "packages/open-empires-backend"]
 	path = packages/open-empires-backend
 	url = git@github-ozyman42:open-empires/open-empires-backend.git
+[submodule "packages/open-empires-api-bindings"]
+	path = packages/open-empires-api-bindings
+	url = git@github-ozyman42:open-empires/open-empires-api-bindings.git
