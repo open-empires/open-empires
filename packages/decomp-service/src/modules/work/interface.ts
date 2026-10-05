@@ -19,9 +19,33 @@ import type { SubjectIoError, SubjectParseError } from '../subject/interface';
  * to the queue by its lease expiring, never by someone noticing it is gone.
  */
 
+/**
+ * The caller does not hold a live lease on this address.
+ *
+ * `because` exists because this one tag covered four different situations and
+ * the caller had to guess which. Worker r37-b read a 409 as "already proven"
+ * when the addresses certainly were not, and spent its time re-deriving work
+ * it already held the answer to. Each of these needs a different response:
+ *
+ *   never-claimed    claim it
+ *   lease-expired    claim it again; the work is still there
+ *   held-by-another  leave it alone, someone else is on it
+ *   already-proven   nothing to do
+ *
+ * `urllib` raises on a 409 and the body is only visible through `e.read()`,
+ * so the reason is also in the message itself.
+ */
 export class NotClaimed extends Schema.TaggedError<NotClaimed>()('NotClaimed', {
   va: Schema.Number,
   agentId: Schema.String,
+  because: Schema.Literals([
+    'never-claimed',
+    'lease-expired',
+    'held-by-another',
+    'already-proven',
+  ]),
+  /** Plain-language form of `because`, for a client that only shows a message. */
+  detail: Schema.String,
 }) {}
 
 export class UnknownFunction extends Schema.TaggedError<UnknownFunction>()(

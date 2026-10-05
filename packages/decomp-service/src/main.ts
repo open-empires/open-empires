@@ -97,8 +97,20 @@ const handle = async (
   const result = await Effect.runPromise(Effect.result(program));
   if (result._tag === 'Success') return json(result.success);
   const failure = result.failure as { _tag: string } & Record<string, unknown>;
+  // `message` is the one field a client is likely to print. urllib and most
+  // HTTP helpers raise on a 4xx and expose the body only through an extra
+  // call, so an error whose reason lives three levels into a JSON object is
+  // an error nobody reads -- one worker took a 409 to mean "already proven"
+  // when it meant "your lease expired" and re-derived work it still held.
   return json(
-    { error: failure._tag, detail: failure },
+    {
+      error: failure._tag,
+      message:
+        typeof failure.detail === 'string'
+          ? failure.detail
+          : `${failure._tag}: ${JSON.stringify(failure)}`,
+      detail: failure,
+    },
     statusFor(failure._tag),
   );
 };
@@ -618,7 +630,29 @@ const describeFailure = (cause: unknown): string => {
  * second copy would contend for the same rows.
  */
 const supervise = () => {
-  const every = (label: string, seconds: number, body: () => Promise<void>) => {
+  /**
+   * A server-owned job, on an interval, with its FIRST run delayed.
+   *
+   * `void tick()` fired every job the moment the server started. Each of
+   * these is heavy and synchronous -- the inventory audit decodes all 6,982
+   * entries, the portable tree converts 3,321 reconstructions, the globals
+   * inventory walks the whole data region -- so starting them together
+   * saturated the event loop, `/api/health` could not be answered, and the
+   * supervisor's three probes timed out and killed the process. It then
+   * booted, did the same thing, and was killed again: a restart loop the
+   * service could not escape, and every restart began by redoing the work
+   * that caused it.
+   *
+   * So the first run waits. Boot finishes, health answers, agents can claim,
+   * and the heavy work starts afterwards -- staggered, so two jobs do not
+   * block the loop at the same moment.
+   */
+  const every = (
+    label: string,
+    seconds: number,
+    body: () => Promise<void>,
+    firstRunAfterSeconds = 0,
+  ) => {
     const tick = async () => {
       try {
         await body();
@@ -633,7 +667,8 @@ const supervise = () => {
         console.error(`[${label}] ${describeFailure(e)}`);
       }
     };
-    void tick();
+    if (firstRunAfterSeconds <= 0) void tick();
+    else setTimeout(() => void tick(), firstRunAfterSeconds * 1000);
     return setInterval(() => void tick(), seconds * 1000);
   };
 
@@ -654,7 +689,7 @@ const supervise = () => {
     );
     const added = reports.reduce((a, r) => a + r.added, 0);
     if (added > 0) console.log(`[discovery] ${added} new function(s) entered the inventory`);
-  });
+  }, 90); // first run delayed: decodes every proven function to harvest call targets
 
   // Does the inventory describe the bytes? An entry whose recorded extent
   // does not decode reaches an agent with no readable body, and before this
@@ -684,7 +719,7 @@ const supervise = () => {
           `${a.undecodable.length} do not (${repaired} repaired this pass)`,
       );
     }
-  });
+  }, 150); // first run delayed: decodes all 6,982 inventory entries
 
   // The portable tree is a CONSEQUENCE of the proven set, like discovery.
   // It had been run once, covering 2,614 files while 3,314 were proven, so
@@ -702,7 +737,7 @@ const supervise = () => {
     );
     const n = (r as { converted?: number }).converted ?? 0;
     if (n > 0) console.log(`[portable] ${n} reconstruction(s) converted for the browser build`);
-  });
+  }, 210); // first run delayed: converts every reconstruction for the browser build
 
   // Naming import slots is also a consequence of the proven set: every CRT
   // function identified makes its library object's relocation table readable,
@@ -727,7 +762,7 @@ const supervise = () => {
       console.log(`[import-names] ${named} slot(s) named from library relocations: ` +
         r.slotsNewlyNamed.map((s) => `0x${s.slot.toString(16).toUpperCase()}=${s.name}`).join(' '));
     }
-  });
+  }, 330); // first run delayed: re-derives every import binding from the libraries
 
   // The globals inventory is a CONSEQUENCE of the proven set, like discovery
   // and the portable tree. Every new proof turns the literal addresses in one
@@ -749,7 +784,7 @@ const supervise = () => {
       `[globals] ${report.globals} global(s), ${proven} evidenced by a proven function, ` +
         `${report.named} named, ${report.sized} sized`,
     );
-  });
+  }, 270); // first run delayed: walks the whole data region
 
   every('reaper', 30, async () => {
     const freed = await Effect.runPromise(

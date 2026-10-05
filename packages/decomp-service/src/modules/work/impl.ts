@@ -109,12 +109,38 @@ export class WorkImpl
          AND NOT EXISTS (SELECT 1 FROM claims cl
                      WHERE cl.subject_sha = f.subject_sha AND cl.va = f.va
                        AND cl.released_at IS NULL AND cl.expires_at > ?)
-       -- Smallest first. Ordering by size DESC gave the first caller the
-       -- largest function in the binary (13,791 bytes, 3,901 instructions),
-       -- which is the least likely thing in the queue to be solved. Agents
-       -- succeed by adapting an already-solved sibling, so the queue serves
-       -- the most tractable work and the byte total follows from throughput.
-       ORDER BY f.size ASC
+       -- Largest first, but never larger than twice the biggest function
+       -- anyone has actually proven.
+       --
+       -- Smallest-first was right while there were no solved siblings to
+       -- adapt, and its stated premise was that "the byte total follows from
+       -- throughput". Measured today, it does not. 3,355 functions are proven
+       -- and they hold 221,332 bytes, mean 65; the 3,627 unproven hold
+       -- 1,716,228 bytes, mean 473. Only 4,519 of those remaining bytes --
+       -- 0.26% -- are in functions under 64 bytes, while 75% are in functions
+       -- of 256 bytes or more.
+       --
+       -- The success rate by size says agents can do that work. Of the
+       -- functions ever attempted: 100% proven under 16 bytes, 99% at 16-63,
+       -- 96% at 64-255, 76% at 256-1023, 75% at 1024-4095. The two bands
+       -- holding the bytes succeed three times in four, and had been sampled
+       -- at 8% and 2% respectively -- not because they fail, but because the
+       -- queue never served them. Expected bytes per attempt is about 144 in
+       -- the 64-255 band against 378 at 256-1023 and 1,312 at 1024-4095.
+       --
+       -- Ordering by size DESC outright is what served the 13,791-byte
+       -- function to the first caller, so the ceiling is derived from
+       -- evidence instead: twice the largest proven extent, floored at 1024
+       -- so the queue is never trivially small. It ratchets -- the largest
+       -- proven is 2,009 bytes today, which admits up to 4,018, and proving
+       -- one of those raises the ceiling again. A plain 'at most the largest proven'
+       -- could never rise at all, because nothing above the ceiling would
+       -- ever be served to raise it.
+         AND f.size <= (
+           SELECT MAX(1024, 2 * COALESCE(MAX(p2.size), 0)) FROM proven p2
+            WHERE p2.subject_sha = f.subject_sha
+         )
+       ORDER BY f.size DESC
        LIMIT ?`,
       [t, count],
     );
@@ -359,6 +385,62 @@ export class WorkImpl
     };
   }
 
+  /**
+   * Why the caller does not hold this address. Asked only on the failure
+   * path, so it costs nothing when a lease is live.
+   *
+   * One tag used to cover four situations and the caller had to guess. A 409
+   * read as "already proven" sent one worker back to re-derive answers it was
+   * still holding.
+   */
+  private *whyNotClaimed(
+    va: number,
+    agentId: string,
+  ): EffectGen<NotClaimed, DbError> {
+    const db = this.dependencies.Db;
+    const now = Date.now() / 1000;
+    const proven = (yield* db.one('SELECT COUNT(*) AS n FROM proven WHERE va = ?', [va])) as
+      | { n: number }
+      | null;
+    if ((proven?.n ?? 0) > 0) {
+      return new NotClaimed({
+        va, agentId, because: 'already-proven',
+        detail: `0x${va.toString(16)} is already proven byte-exact; there is nothing to do`,
+      });
+    }
+    const mine = (yield* db.one(
+      `SELECT expires_at FROM claims
+        WHERE va = ? AND agent_id = ? AND released_at IS NULL
+        ORDER BY expires_at DESC LIMIT 1`,
+      [va, agentId],
+    )) as { expires_at: number } | null;
+    if (mine !== null) {
+      return new NotClaimed({
+        va, agentId, because: 'lease-expired',
+        detail:
+          `your lease on 0x${va.toString(16)} expired ` +
+          `${Math.round(now - mine.expires_at)}s ago; claim it again -- the work is still there`,
+      });
+    }
+    const other = (yield* db.one(
+      `SELECT agent_id FROM claims
+        WHERE va = ? AND released_at IS NULL AND expires_at > ? LIMIT 1`,
+      [va, now],
+    )) as { agent_id: string } | null;
+    if (other !== null) {
+      return new NotClaimed({
+        va, agentId, because: 'held-by-another',
+        detail: `0x${va.toString(16)} is held by ${other.agent_id}; leave it to them`,
+      });
+    }
+    return new NotClaimed({
+      va, agentId, because: 'never-claimed',
+      detail:
+        `you have never claimed 0x${va.toString(16)}; ` +
+        `POST /api/work/claim with {"vas":[${va}]} to take it`,
+    });
+  }
+
   *sweep(
     agentId: string,
     va: number,
@@ -417,7 +499,7 @@ export class WorkImpl
        WHERE va = ? AND agent_id = ? AND released_at IS NULL AND expires_at > ?`,
       [va, agentId, now()],
     );
-    if (held === null) return yield* Effect.fail(new NotClaimed({ va, agentId }));
+    if (held === null) return yield* Effect.fail(yield* this.whyNotClaimed(va, agentId));
 
     const fn = (yield* db.one(`SELECT size FROM functions WHERE va = ?`, [va])) as
       | { size: number }
@@ -494,7 +576,7 @@ export class WorkImpl
       `SELECT 1 FROM claims WHERE va = ? AND agent_id = ? AND released_at IS NULL`,
       [va, agentId],
     );
-    if (held === null) return yield* Effect.fail(new NotClaimed({ va, agentId }));
+    if (held === null) return yield* Effect.fail(yield* this.whyNotClaimed(va, agentId));
     yield* db.run(
       `INSERT INTO near_misses(subject_sha, va, blocked_class, eliminated, updated_at)
        SELECT c.subject_sha, ?, ?, ?, ? FROM current_config c WHERE c.only_row = 1
