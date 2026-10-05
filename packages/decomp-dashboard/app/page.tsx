@@ -26,6 +26,14 @@ interface Status {
   blocked: Counted[];
   progress: { at: number; proven: number; bytes: number }[];
   queue: { depth: number; claimed: number };
+  inventory: {
+    audit: OptionLike<{
+      at: number; entries: number; workable: number;
+      undecodable: number; undecodableProven: number; repaired: number;
+    }>;
+    rejected: number;
+    byEvidence: { evidence: string; functions: number; proven: number }[];
+  };
   imports: {
     slots: number; byResolution: Counted[]; bindings: number;
     bindingsVerified: number; distinctApis: number; byDll: Counted[];
@@ -58,6 +66,29 @@ const pick = (rows: Counted[], key: string) =>
   rows.find((r) => r.key === key)?.n ?? 0;
 
 /* ----------------------------------------------------------- presentation */
+
+/** The evidence names are how the service records them; these are the English. */
+const evidenceLabel = (k: string): string =>
+  k === 'pre-existing'
+    ? 'found before this system existed'
+    : k === 'data-pointer'
+      ? 'found via a table of function addresses'
+      : k === 'proven-call'
+        ? 'found by a call inside a rebuilt function'
+        : k === 'decoded-call'
+          ? 'found by a call inside an unrebuilt function'
+          : k;
+
+const evidenceExplain = (k: string): string =>
+  k === 'pre-existing'
+    ? 'Carried over from the earlier scripts, which is why some of their lengths are wrong.'
+    : k === 'data-pointer'
+      ? 'The game keeps tables of function addresses so it can call one of several versions of the same operation. An address sitting in such a table is a function start, whatever its first instruction looks like.'
+      : k === 'proven-call'
+        ? 'The strongest evidence there is: we have already rebuilt the surrounding function byte-for-byte, so the instruction making this call is a fact about verified bytes rather than a guess about where instructions begin.'
+        : k === 'decoded-call'
+          ? 'A call instruction inside a function we have not rebuilt yet, so it depends on having read the instruction boundaries correctly.'
+          : '';
 
 function Card({
   label, value, prov, stale,
@@ -279,6 +310,62 @@ export default function Page() {
           </table>
         </Section>
       )}
+
+      <Section
+        title="Is the list of functions trustworthy?"
+        explain={
+          <>
+            Before anything can be rebuilt, we need a list of where each function
+            starts and how long it is. That list came from several sources over
+            months, and some entries are wrong — an address that is not really the
+            start of a function, or a length that stops in the middle of an
+            instruction. A wrong length is the dangerous kind:{' '}
+            <strong>the function then arrives with no readable body at all</strong>,
+            and nothing anywhere reports it, so the address simply sits in the queue
+            forever. Two functions were stuck that way, recorded 436 and 482 bytes
+            short of their real length. These figures are re-measured from the
+            game&apos;s own bytes every 15 minutes.
+          </>
+        }
+      >
+        <div className="grid">
+          <Card
+            label="functions we can read"
+            value={f(some(s.inventory.audit)?.workable)}
+            prov={`of ${f(some(s.inventory.audit)?.entries)} in the list. Their recorded length matches what the bytes actually decode to, so the function can be read and worked on`}
+          />
+          <Card
+            label="functions we cannot read"
+            value={f(some(s.inventory.audit)?.undecodable)}
+            stale={(some(s.inventory.audit)?.undecodable ?? 0) > 0}
+            prov="their recorded length does not decode. Each is either a length that cuts an instruction in half, or a function ending in a switch table, which is data the disassembler cannot read. Until that is settled they are refused rather than handed over as a guess"
+          />
+          <Card
+            label="addresses ruled out"
+            value={f(s.inventory.rejected)}
+            prov="addresses recorded as NOT the start of a function, each stored with the decode that proves it — one of them is a CPU halt instruction. Kept as a record rather than deleted, because deleting one only means the next pass adds it back"
+          />
+          <Card
+            label="lengths corrected automatically"
+            value={f(some(s.inventory.audit)?.repaired)}
+            prov="in the most recent pass. Only ever where the stored length already failed to decode, and never for a function already proved, whose length a proof depends on"
+          />
+        </div>
+        <p className="explain">
+          Where each function in the list came from, and how many of each kind have
+          been rebuilt so far:
+        </p>
+        <div className="grid">
+          {s.inventory.byEvidence.map((e) => (
+            <Card
+              key={e.evidence}
+              label={evidenceLabel(e.evidence)}
+              value={f(e.functions)}
+              prov={`${f(e.proven)} of these have been rebuilt byte-for-byte. ${evidenceExplain(e.evidence)}`}
+            />
+          ))}
+        </div>
+      </Section>
 
       <Section
         title="Phase 3 · Replacing Windows"
