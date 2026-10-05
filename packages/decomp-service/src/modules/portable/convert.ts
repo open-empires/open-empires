@@ -46,7 +46,21 @@ const ASM = /\b__asm\b/;
  * `literalsOutsideThePattern` reports those rather than leaving them to be
  * discovered as a wasm null dereference.
  */
-const ADDRESS_CAST = /\(\s*([\w:]+(?:\s*\*)+)\s*\)\s*(0x6[0-9a-fA-F]{5})/g;
+/**
+ * A cast of a literal address, whatever its leading digit.
+ *
+ * This matched `0x6` followed by five digits, which covers 0x600000-0x6fffff
+ * and stops there -- while the globals model spans 0x629000 to 0x7a4666. Every
+ * address from 0x700000 up was therefore invisible to the rewrite and left as
+ * a bare number: 61 of them across 46 rebuilt functions, all in 0x79xxxx, each
+ * one a dereference in the browser build of memory that does not exist there.
+ *
+ * The range cannot be said in a regular expression without writing out the
+ * digit cases, which is how the bug got in. The pattern now matches any
+ * address-shaped literal and the RANGE is checked in code, where it is one
+ * comparison against the model's own bounds.
+ */
+const ADDRESS_CAST = /\(\s*([\w:]+(?:\s*\*)+)\s*\)\s*(0x[0-9a-fA-F]{6,8})/g;
 
 /** Any cast of a literal address in the globals model's whole span, so the
  *  ones `ADDRESS_CAST` cannot reach can be counted instead of missed. */
@@ -112,11 +126,21 @@ export const convert = (source: string): Conversion => {
   // comment-stripped code. Fourteen files therefore carried `#include
   // "gameimage.h"` while being reported as not needing the globals model. A
   // literal address in a comment is prose, so the code is what is asked.
-  const needsGlobals = new RegExp(ADDRESS_CAST.source).test(
-    body.replace(CONVENTIONS, '').replace(DECLSPEC, ''),
-  );
+  const inModel = (value: number): boolean =>
+    value >= GLOBALS_BASE && value < GLOBALS_END;
+
+  // ONE pass decides both. Asking the question twice is what let the rewrite
+  // and the recorded state disagree once already.
+  let needsGlobals = false;
+  for (const m of body
+    .replace(CONVENTIONS, '')
+    .replace(DECLSPEC, '')
+    .matchAll(new RegExp(ADDRESS_CAST.source, 'g'))) {
+    if (inModel(Number(m[2]))) { needsGlobals = true; break; }
+  }
   const rewritten = needsGlobals
-    ? stripped.replace(ADDRESS_CAST, '($1)GPTR($2)')
+    ? stripped.replace(ADDRESS_CAST, (whole, cast: string, addr: string) =>
+        inModel(Number(addr)) ? `(${cast})GPTR(${addr})` : whole)
     : stripped;
   const text = needsGlobals ? GLOBALS_INCLUDE + rewritten : rewritten;
 

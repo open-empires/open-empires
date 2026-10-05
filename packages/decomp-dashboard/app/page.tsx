@@ -42,6 +42,8 @@ interface Status {
     importSlotsTotal: number;
     unattributedDataPointers: number;
     dataPointersTotal: number;
+    strandedLiterals: number;
+    strandedInFunctions: number;
   };
   /** Prose, written by whoever is working. Null until the first note. */
   workingOn: { note: string; updatedAt: number } | null;
@@ -373,6 +375,12 @@ export default function Page() {
             value={`${f(s.blockers.unattributedDataPointers)} / ${f(s.blockers.dataPointersTotal)}`}
             stale={s.blockers.unattributedDataPointers > 0}
             prov="pointers inside the game's data that we cannot yet place inside a variable of known extent. The browser build has to resolve every one. This only closes as more routines are rebuilt — there is no shortcut"
+          />
+          <Card
+            label="addresses the browser build cannot resolve"
+            value={f(s.blockers.strandedLiterals)}
+            stale={s.blockers.strandedLiterals > 0}
+            prov={`in ${f(s.blockers.strandedInFunctions)} rebuilt routines. The original refers to its variables by bare address; the browser version rewrites each into an offset inside the loaded data. These are the ones the rewrite does not catch, and each would read memory that does not exist there`}
           />
           <Card
             label="routines nobody can read"

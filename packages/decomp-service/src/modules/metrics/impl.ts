@@ -277,7 +277,9 @@ export class MetricsImpl
          (SELECT COALESCE(SUM(enumerated - attributed), 0)
             FROM globals_pointer_coverage WHERE target = 'data')          AS unattributed_ptrs,
          (SELECT COALESCE(SUM(enumerated), 0)
-            FROM globals_pointer_coverage WHERE target = 'data')          AS ptrs_total`,
+            FROM globals_pointer_coverage WHERE target = 'data')          AS ptrs_total,
+         (SELECT COUNT(*) FROM port_stranded_literals)                    AS stranded,
+         (SELECT COUNT(DISTINCT va) FROM port_stranded_literals)          AS stranded_fns`,
     )) as Record<string, unknown> | null;
 
     return {
@@ -294,6 +296,8 @@ export class MetricsImpl
       importSlotsTotal: num(row?.slots_total),
       unattributedDataPointers: num(row?.unattributed_ptrs),
       dataPointersTotal: num(row?.ptrs_total),
+      strandedLiterals: num(row?.stranded),
+      strandedInFunctions: num(row?.stranded_fns),
     };
   }
 

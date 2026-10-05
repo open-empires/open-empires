@@ -139,6 +139,14 @@ export interface Blockers {
    *  one of them. */
   readonly unattributedDataPointers: number;
   readonly dataPointersTotal: number;
+  /**
+   * Literal addresses in the portable rendering that the rewrite does not
+   * match, so they stay bare numbers. Each is a dereference, in the browser
+   * build, of an address that does not exist there -- the one correctness
+   * hole between a proven function and a running one.
+   */
+  readonly strandedLiterals: number;
+  readonly strandedInFunctions: number;
 }
 
 export interface IMetrics {

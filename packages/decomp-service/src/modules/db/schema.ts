@@ -1607,4 +1607,31 @@ DELETE FROM toolchains
               WHERE cl_sha256 = '5e712379f6f2dc979bdc09573a9609a72225288ec6da232b83e5962800cb5ff4'`,
     verifyExpects: 'zero',
   },
+  {
+    id: '020-port-stranded-literals',
+    sql: `
+-- Literal addresses the browser build cannot resolve.
+--
+-- A reconstruction refers to the game's variables by bare address, because
+-- that is what the original compiler emitted. The portable rendering rewrites
+-- each one into an offset inside the loaded data image; a literal the rewrite
+-- pattern does not match stays a bare number, and in WebAssembly that is a
+-- dereference of an address which does not exist there.
+--
+-- The conversion already computed these and then THREW THEM AWAY -- they were
+-- returned in a report and never stored, so the one correctness hole standing
+-- between the proven set and a browser build could not be counted, tracked,
+-- or shown. Stored per (function, literal), so the same address stranded in
+-- four functions is four facts and the worst offenders are a query.
+CREATE TABLE port_stranded_literals (
+  subject_sha TEXT    NOT NULL REFERENCES subjects(sha256),
+  va          INTEGER NOT NULL,   -- the function whose source holds it
+  literal     INTEGER NOT NULL,   -- the address the rewrite did not match
+  found_at    REAL    NOT NULL,
+  PRIMARY KEY (subject_sha, va, literal)
+);
+CREATE INDEX port_stranded_by_literal
+    ON port_stranded_literals(subject_sha, literal);
+`,
+  },
 ];

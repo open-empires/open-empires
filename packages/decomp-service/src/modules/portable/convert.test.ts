@@ -73,15 +73,33 @@ test('a file with no literal address gains no dependency on the globals model', 
   expect(out.text).not.toContain('gameimage.h');
 });
 
-test('a literal inside the model but outside the rewrite pattern is reported', () => {
-  // The pattern reaches 0x6xxxxx; the model spans 0x629000..0x7A28A6. Anything
-  // from 0x700000 up would be a wasm dereference of an address that is not
-  // there, so it is named rather than left to be discovered at runtime.
-  const out = converted('int f() { return *(int *)0x792454; }\n');
-  expect(out.needsGlobals).toBe(false);
-  expect(out.literalsOutsideThePattern).toEqual([0x792454]);
+test('a literal high in the model is rewritten, not stranded', () => {
+  // This test used to assert the opposite, and in doing so recorded a bug as
+  // the specification. The rewrite matched `0x6` followed by five digits,
+  // which stops at 0x6fffff, while the model spans 0x629000..0x7a4666 -- so
+  // every address from 0x700000 up was left as a bare number. Measured over
+  // the proven corpus that was 61 literals across 46 rebuilt functions, all
+  // in 0x79xxxx, each one a dereference in the browser build of memory that
+  // is not there.
+  //
+  // The range is now checked in code rather than spelled as digit cases in a
+  // regular expression, which is how it went wrong.
   expect(0x792454).toBeGreaterThanOrEqual(GLOBALS_BASE);
   expect(0x792454).toBeLessThan(GLOBALS_END);
+  const out = converted('int f() { return *(int *)0x792454; }\n');
+  expect(out.needsGlobals).toBe(true);
+  expect(out.text).toContain('GPTR(0x792454)');
+  expect(out.literalsOutsideThePattern).toEqual([]);
+});
+
+test('an address just past the end of the model is left alone', () => {
+  // The boundary matters in both directions: rewriting an address the model
+  // does not map would point it at nothing.
+  const past = `0x${GLOBALS_END.toString(16)}`;
+  const out = converted(`int f() { return *(int *)${past}; }\n`);
+  expect(out.needsGlobals).toBe(false);
+  expect(out.text).not.toContain('GPTR');
+  expect(out.literalsOutsideThePattern).toEqual([]);
 });
 
 test('an address outside the model is not reported as stranded', () => {

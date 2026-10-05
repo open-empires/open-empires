@@ -61,12 +61,29 @@ export class PortableImpl
       });
     }
 
+    // Stranded literals are STORED, not just returned. They were computed on
+    // every run and discarded with the report, so the one correctness hole
+    // between the proven set and a browser build could not be counted or
+    // tracked. Replaced wholesale with the files, for the same reason they
+    // are: a literal from a source no longer proved is an answer about
+    // something that is gone.
     // Replaced wholesale for this subject, inside one transaction: a
     // conversion is derived entirely from the sources in force, so a row left
     // behind from a source that is no longer proved would be an answer about a
     // file the generated tree does not contain.
     yield* db.tx(function* () {
       yield* db.run('DELETE FROM port_files WHERE subject_sha = ?', [subjectSha]);
+      yield* db.run('DELETE FROM port_stranded_literals WHERE subject_sha = ?', [
+        subjectSha,
+      ]);
+      const foundAt = Date.now() / 1000;
+      for (const s of stranded) {
+        yield* db.run(
+          `INSERT INTO port_stranded_literals(subject_sha, va, literal, found_at)
+           VALUES (?,?,?,?) ON CONFLICT(subject_sha, va, literal) DO NOTHING`,
+          [subjectSha, s.va, s.literal, foundAt],
+        );
+      }
       for (const f of files) {
         yield* db.run(
           `INSERT INTO port_files(subject_sha, va, state, reason) VALUES (?,?,?,?)`,
