@@ -21,6 +21,7 @@
 import { Effect, Layer, Option, pipe } from 'effect';
 import { check as healthCheck, report as healthReport } from './health';
 import { throttleStats } from './modules/gate/throttle';
+import { canaryState, superviseCanary } from './canary';
 import { modules } from './modules';
 import { ComposeImpl } from './modules/compose/impl';
 import { DbImpl, handle as dbHandle } from './modules/db/impl';
@@ -330,10 +331,24 @@ const routes = async (req: Request): Promise<Response> => {
     // Answering 200 whatever the state is what let a broken submit path
     // serve errors for 75 minutes.
     const h = healthCheck(dbHandle());
-    // The compile queue is reported here because a burst that is merely slow
-    // looks identical to a service that is broken, and the difference is the
-    // whole point of the throttle.
-    return json({ ...h, compiler: throttleStats() }, h.ok ? 200 : 503);
+    const canary = canaryState();
+    // The gate is part of being healthy. Twice now a work path has been dead
+    // while health answered ok:true, because no check exercised it. A canary
+    // that has run and failed turns health red; one that has not run yet is
+    // not evidence either way and does not.
+    const gateOk = Option.isNone(canary) || canary.value.ok;
+    const ok = h.ok && gateOk;
+    return json(
+      {
+        ...h,
+        ok,
+        compiler: throttleStats(),
+        gate: Option.isNone(canary)
+          ? { state: 'not yet probed' }
+          : { state: canary.value.ok ? 'ok' : 'FAILING', ...canary.value },
+      },
+      ok ? 200 : 503,
+    );
   }
 
   return json({ error: 'not found', path: url.pathname }, 404);
@@ -449,3 +464,7 @@ console.log(`decomp service on http://127.0.0.1:${server.port}`);
   console.log(ok ? healthReport(healthCheck(dbHandle())) : 'SERVING DEGRADED');
   setInterval(() => void say(), 60_000);
 }
+
+// One real compilation every three minutes. A gate that cannot compile is a
+// service that cannot do its job, however green its SQL looks.
+superviseCanary(180);
