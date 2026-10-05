@@ -58,6 +58,25 @@ export class RegistryImpl
       [t, t, Option.getOrNull(note), id],
     );
     if (n === 0) return yield* Effect.fail(new UnknownAgent({ id }));
+
+    // AN AGENT THAT FINISHES GIVES BACK WHAT IT HELD.
+    //
+    // Deregistering left outstanding claims live, so a worker that finished
+    // without releasing locked those functions for the rest of a two-hour
+    // lease -- against a queue where one function can be the largest piece of
+    // work available. Two finished agents were holding claims when this was
+    // noticed, and nothing would have freed them sooner than the reaper.
+    //
+    // Saying you are done IS giving the work back; there is no case where an
+    // agent means to finish and keep a lease.
+    const freed = yield* this.dependencies.Db.run(
+      `UPDATE claims SET released_at = ?
+        WHERE agent_id = ? AND released_at IS NULL`,
+      [t, id],
+    );
+    if (freed > 0) {
+      console.log(`[registry] ${id} finished holding ${freed} claim(s); released`);
+    }
   }
 
   *list(): EffectGen<ReadonlyArray<Agent>, DbError> {
