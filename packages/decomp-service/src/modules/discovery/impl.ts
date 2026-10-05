@@ -8,6 +8,7 @@ import {
   DiscoveryFailed,
   type Candidate, type Evidence, type ExpansionReport, type IDiscovery,
   type Remeasurement, type RejectionOutcome, type WorkabilityAudit,
+  type GapReport,
 } from './interface';
 
 type Failure = DbError | DisasmError | SubjectIoError | SubjectParseError | DiscoveryFailed;
@@ -87,7 +88,7 @@ export class DiscoveryImpl
     const starts = new Set(known.map((f) => f.va));
 
     const byEvidence: Record<Evidence, number> = {
-      'proven-call': 0, 'data-pointer': 0, 'decoded-call': 0,
+      'proven-call': 0, 'data-pointer': 0, 'decoded-call': 0, 'gap-residue': 0,
     };
     const deferred: { va: number; reason: string }[] = [];
     const fresh = new Map<number, Candidate>();
@@ -171,6 +172,116 @@ export class DiscoveryImpl
       }
     }
     return yield* this.record(candidates, img, vas.length);
+  }
+
+  *scanGaps(add: boolean): EffectGen<GapReport, Failure> {
+    const db = this.dependencies.Db;
+    const disasm = this.dependencies.Disasm;
+    const img = yield* this.image();
+    const sha = yield* this.subjectSha();
+    const known = yield* this.inventory();
+
+    const rejected = new Set(
+      (yield* db.all('SELECT va FROM rejected_entries WHERE subject_sha = ?', [sha]))
+        .map((r: unknown) => (r as { va: number }).va),
+    );
+
+    // 0x90 is NOP and 0xCC is INT3; MSVC pads between functions with either.
+    // 0x00 is counted as padding too: the linker zero-fills to a boundary,
+    // and `00 00` decodes as a valid instruction, which is exactly how
+    // unreadable bytes once became phantom entries.
+    const PAD = new Set([0x90, 0xcc, 0x00]);
+    const byteAt = (va: number): number | undefined => img.bytes[va - img.imageBase];
+
+    const report = {
+      at: Date.now() / 1000,
+      textBytes: img.textHi - img.textLo,
+      coveredBytes: known.reduce((n, f) => n + f.size, 0),
+      gaps: 0,
+      paddingGaps: 0,
+      paddingBytes: 0,
+      residueGaps: 0,
+      residueBytes: 0,
+      added: 0,
+      deferred: [] as Array<{ va: number; bytes: number; reason: string; head: string }>,
+    };
+
+    for (let i = 0; i + 1 < known.length; i++) {
+      const gapLo = known[i]!.va + known[i]!.size;
+      const gapHi = known[i + 1]!.va;
+      if (gapHi <= gapLo) continue;
+      report.gaps += 1;
+
+      let allPadding = true;
+      for (let va = gapLo; va < gapHi; va++) {
+        const b = byteAt(va);
+        if (b === undefined || !PAD.has(b)) { allPadding = false; break; }
+      }
+      if (allPadding) {
+        report.paddingGaps += 1;
+        report.paddingBytes += gapHi - gapLo;
+        continue;
+      }
+      report.residueGaps += 1;
+      report.residueBytes += gapHi - gapLo;
+
+      // Walk the gap: skip padding, measure an extent from the first real
+      // byte, repeat. A gap can hold more than one unreferenced function.
+      let at = gapLo;
+      while (at < gapHi) {
+        const b = byteAt(at);
+        if (b === undefined) break;
+        if (PAD.has(b)) { at += 1; continue; }
+        if (rejected.has(at)) { at += 1; continue; }
+
+        const extent = yield* disasm.measureExtent(img, at, gapHi);
+        if (Option.isNone(extent)) {
+          const head = [...img.bytes.subarray(at - img.imageBase, at - img.imageBase + 8)]
+            .map((x) => x.toString(16).padStart(2, '0'))
+            .join(' ');
+          report.deferred.push({
+            va: at,
+            bytes: gapHi - at,
+            reason: 'does not decode contiguously to a terminator within the gap',
+            head,
+          });
+          break;
+        }
+        const size = extent.value;
+        if (add) {
+          report.added += yield* db.run(
+            `INSERT INTO functions(subject_sha, va, size, discovered_by)
+             VALUES (?,?,?,'gap-residue') ON CONFLICT(subject_sha, va) DO NOTHING`,
+            [sha, at, size],
+          );
+        }
+        at += size;
+      }
+    }
+    // Stored: the frontier has to be countable, and its size needs a history.
+    // 10.93% of the executable being unclaimed is the kind of fact that stays
+    // invisible precisely because no rule covers it.
+    yield* db.run('DELETE FROM executable_gaps WHERE subject_sha = ?', [sha]);
+    for (const d of report.deferred) {
+      yield* db.run(
+        `INSERT INTO executable_gaps(subject_sha, va, bytes, head, reason, found_at)
+         VALUES (?,?,?,?,?,?)
+         ON CONFLICT(subject_sha, va) DO UPDATE SET
+           bytes = excluded.bytes, head = excluded.head,
+           reason = excluded.reason, found_at = excluded.found_at`,
+        [sha, d.va, d.bytes, d.head, d.reason, report.at],
+      );
+    }
+    yield* db.run(
+      `INSERT INTO gap_scans(subject_sha, at, text_bytes, covered_bytes, padding_gaps,
+                             padding_bytes, residue_gaps, residue_bytes, added)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+      [
+        sha, report.at, report.textBytes, report.coveredBytes, report.paddingGaps,
+        report.paddingBytes, report.residueGaps, report.residueBytes, report.added,
+      ],
+    );
+    return report;
   }
 
   *remeasure(

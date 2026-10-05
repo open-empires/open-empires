@@ -398,6 +398,38 @@ const routes = async (req: Request): Promise<Response> => {
             };
           }
 
+          // Functions nothing points at. Every other rule follows a
+          // reference, so none can find one; this works by elimination over
+          // the space between known extents.
+          if (seg[2] === 'gaps') {
+            const g = yield* d.scanGaps(body.add === true);
+            return {
+              at: g.at,
+              textBytes: g.textBytes,
+              coveredBytes: g.coveredBytes,
+              coveredPct: Number(((100 * g.coveredBytes) / g.textBytes).toFixed(2)),
+              gaps: g.gaps,
+              paddingGaps: g.paddingGaps,
+              paddingBytes: g.paddingBytes,
+              residueGaps: g.residueGaps,
+              residueBytes: g.residueBytes,
+              residuePct: Number(((100 * g.residueBytes) / g.textBytes).toFixed(2)),
+              added: g.added,
+              deferred: g.deferred.length,
+              // The largest unmeasurable regions first: these are where the
+              // remaining executable bytes actually are.
+              worst: [...g.deferred]
+                .sort((a, b) => b.bytes - a.bytes)
+                .slice(0, 25)
+                .map((x) => ({
+                  va: `0x${x.va.toString(16)}`,
+                  bytes: x.bytes,
+                  head: x.head,
+                  reason: x.reason,
+                })),
+            };
+          }
+
           if (seg[2] === 'remeasure') {
             // No `vas` means every entry no proof depends on: the whole
             // question of whether the inventory's sizes describe the bytes.
@@ -770,6 +802,31 @@ const supervise = () => {
       );
     }
   }, 150); // first run delayed: decodes all 6,982 inventory entries
+
+  // How much of the game's code is still invisible to every discovery rule.
+  //
+  // The rules all follow a reference -- a call inside a proven function, a
+  // pointer in a table -- so a function nothing references cannot be found by
+  // any of them, however many rounds they run. This measures the space
+  // between known functions and records what is in it. `add` is false: the
+  // regions are real code, with prologues to prove it, but their extents
+  // cannot yet be measured honestly, and a wrong size reaches an agent as a
+  // function with no readable body.
+  every('gap scan', 1800, async () => {
+    const g = await Effect.runPromise(
+      provided(
+        Effect.gen(function* () {
+          const d = yield* modules.Discovery;
+          return yield* d.scanGaps(false);
+        }),
+      ),
+    );
+    console.log(
+      `[gaps] ${((100 * g.coveredBytes) / g.textBytes).toFixed(2)}% of executable bytes ` +
+        `claimed; ${g.residueBytes} byte(s) in ${g.residueGaps} gap(s) are unfound code ` +
+        `(${((100 * g.residueBytes) / g.textBytes).toFixed(2)}%)`,
+    );
+  }, 390); // first run delayed: decodes the whole executable span
 
   // The portable tree is a CONSEQUENCE of the proven set, like discovery.
   // It had been run once, covering 2,614 files while 3,314 were proven, so

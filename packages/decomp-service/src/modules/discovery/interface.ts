@@ -41,7 +41,35 @@ export class DiscoveryFailed extends Schema.TaggedError<DiscoveryFailed>()(
   { reason: Schema.String },
 ) {}
 
-export type Evidence = 'proven-call' | 'data-pointer' | 'decoded-call';
+export type Evidence =
+  | 'proven-call'
+  | 'data-pointer'
+  | 'decoded-call'
+  /**
+   * GAP RESIDUE -- executable bytes between two known extents that are not
+   * padding.
+   *
+   * This is evidence by ELIMINATION rather than by reference, and it is the
+   * only kind that can find a function nothing points at. The inventory grows
+   * from calls and from pointer tables, so a function reached only through a
+   * computed call, or whose only reference is in data this derivation has not
+   * read, is invisible to every other rule however many rounds it runs.
+   *
+   * Measured: the inventory covers 85.81% of the executable span. Of the
+   * 291,413 bytes it does not claim, 5,771 gaps totalling 44,529 bytes are
+   * nothing but 0x90/0xCC/0x00 padding, and 527 gaps totalling 246,884 bytes
+   * -- 10.93% of all executable bytes -- hold real content. The largest
+   * begins `64 a1 00 00 00 00 6a ff`: `mov eax, fs:[0]` then `push -1`, which
+   * is MSVC's structured-exception frame setup and appears only at a function
+   * entry.
+   *
+   * It is deliberately NOT a prologue whitelist. The question asked is "do
+   * these bytes decode contiguously to a terminator, inside a region two
+   * known functions bound" -- a property of the bytes, not a guess about what
+   * entries look like. A first-byte whitelist was tried here before and
+   * rejected 14% of the functions we had already proven.
+   */
+  | 'gap-residue';
 
 export interface Candidate {
   readonly va: number;
@@ -112,6 +140,32 @@ export interface WorkabilityAudit {
   }>;
 }
 
+export interface GapReport {
+  readonly at: number;
+  readonly textBytes: number;
+  /** Bytes claimed by some inventory extent. */
+  readonly coveredBytes: number;
+  readonly gaps: number;
+  /** Gaps that are nothing but padding. Not a finding; the compiler aligns
+   *  functions and the space between them is real. */
+  readonly paddingGaps: number;
+  readonly paddingBytes: number;
+  /** Gaps holding bytes that are not padding: unfound code, or data the
+   *  linker placed in the executable section. */
+  readonly residueGaps: number;
+  readonly residueBytes: number;
+  readonly added: number;
+  /** Residue that could not be measured into an extent, with the reason and
+   *  its first bytes, so a rule that is wrong can be revisited against what
+   *  it excluded rather than silently costing functions nobody can see. */
+  readonly deferred: ReadonlyArray<{
+    readonly va: number;
+    readonly bytes: number;
+    readonly reason: string;
+    readonly head: string;
+  }>;
+}
+
 export interface IDiscovery {
   /**
    * Harvest entries from specific proven functions. Called when a proof
@@ -128,6 +182,21 @@ export interface IDiscovery {
    */
   expandAll(maxRounds: number):
     EffectGen<ReadonlyArray<ExpansionReport>, DbError | DisasmError | SubjectIoError | SubjectParseError | DiscoveryFailed>;
+
+  /**
+   * Find functions in the space BETWEEN known functions.
+   *
+   * Every other rule follows a reference, so none of them can find a function
+   * nothing references. This one works by elimination: executable bytes that
+   * no extent claims and that are not padding are either an unfound function
+   * or data, and asking whether they decode contiguously to a terminator
+   * separates the two.
+   *
+   * `add` records what it measures. Run with it false to size the gap without
+   * changing the inventory.
+   */
+  scanGaps(add: boolean):
+    EffectGen<GapReport, DbError | DisasmError | SubjectIoError | SubjectParseError | DiscoveryFailed>;
 
   /**
    * Re-measure recorded extents from the bytes.

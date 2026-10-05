@@ -81,6 +81,21 @@ export interface InventoryHealth {
     readonly repaired: number;
   }>;
   readonly rejected: number;
+  /**
+   * Executable bytes no inventory extent claims, from the newest gap scan.
+   *
+   * Every discovery rule follows a reference, so none can find a function
+   * nothing references. This is the only figure that says how much of the
+   * game's code is still invisible to all of them.
+   */
+  readonly gaps: Option.Option<{
+    readonly at: number;
+    readonly textBytes: number;
+    readonly coveredBytes: number;
+    readonly paddingBytes: number;
+    readonly residueGaps: number;
+    readonly residueBytes: number;
+  }>;
   /** How each entry entered the inventory, and how much of each kind is
    *  proven -- the question "is discovery producing workable functions". */
   readonly byEvidence: ReadonlyArray<{

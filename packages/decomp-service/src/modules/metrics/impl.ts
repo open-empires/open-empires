@@ -258,7 +258,26 @@ export class MetricsImpl
         ORDER BY functions DESC`,
     )) as ReadonlyArray<Record<string, unknown>>;
 
+    const gaps = (yield* db.one(
+      `SELECT g.at, g.text_bytes, g.covered_bytes, g.padding_bytes,
+              g.residue_gaps, g.residue_bytes
+         FROM gap_scans g
+         JOIN current_config c ON c.subject_sha = g.subject_sha
+        WHERE c.only_row = 1 ORDER BY g.at DESC LIMIT 1`,
+    )) as Record<string, unknown> | null;
+
     return {
+      gaps:
+        gaps === null
+          ? Option.none()
+          : Option.some({
+              at: num(gaps.at),
+              textBytes: num(gaps.text_bytes),
+              coveredBytes: num(gaps.covered_bytes),
+              paddingBytes: num(gaps.padding_bytes),
+              residueGaps: num(gaps.residue_gaps),
+              residueBytes: num(gaps.residue_bytes),
+            }),
       audit:
         a === null
           ? Option.none()

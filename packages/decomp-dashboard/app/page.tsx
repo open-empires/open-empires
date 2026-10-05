@@ -40,6 +40,10 @@ interface Status {
       undecodable: number; undecodableProven: number; repaired: number;
     }>;
     rejected: number;
+    gaps: OptionLike<{
+      at: number; textBytes: number; coveredBytes: number;
+      paddingBytes: number; residueGaps: number; residueBytes: number;
+    }>;
     byEvidence: { evidence: string; functions: number; proven: number }[];
   };
   imports: {
@@ -121,6 +125,12 @@ const stampedAgo = (at: number): string => {
     timeZoneName: 'short',
   });
   return `${when} (${ago(at)})`;
+};
+
+/** A percentage from the newest gap scan, or a dash before the first one. */
+const gapPct = <T,>(o: OptionLike<T> | undefined, pick: (g: T) => number): string => {
+  const g = some(o);
+  return g === undefined ? '—' : pick(g).toFixed(2);
 };
 
 function Card({
@@ -420,6 +430,42 @@ export default function Page() {
             prov="in the most recent pass. Only ever where the stored length already failed to decode, and never for a function already proved, whose length a proof depends on"
           />
         </div>
+        <p className="explain">
+          And the other half of the question — not whether the functions we have are
+          sound, but whether we have found them all. Every method of finding them
+          follows a reference: a call from a function we already have, or an address
+          sitting in a table.{' '}
+          <strong>A function that nothing refers to cannot be found that way at
+          all</strong>, however long we keep looking, so the space between known
+          functions is measured directly:
+        </p>
+        <div className="grid">
+          <Card
+            label="of the code accounted for"
+            value={`${gapPct(s.inventory.gaps, (g) => (100 * g.coveredBytes) / g.textBytes)}%`}
+            prov="executable bytes that belong to a function we have on the list. The rest is either padding the compiler inserted between functions, or code we have not found"
+          />
+          <Card
+            label="unfound code"
+            value={`${gapPct(s.inventory.gaps, (g) => (100 * g.residueBytes) / g.textBytes)}%`}
+            stale
+            prov={`${f(some(s.inventory.gaps)?.residueBytes)} bytes in ${f(some(s.inventory.gaps)?.residueGaps)} stretches between known functions, holding bytes that are not padding. Their opening bytes are unmistakably the start of a function — one begins with the exact instruction pair Microsoft's compiler emits to set up error handling`}
+          />
+          <Card
+            label="padding between functions"
+            value={f(some(s.inventory.gaps)?.paddingBytes)}
+            prov="bytes of filler the compiler inserted to align each function. Not missing code — correctly accounted for as nothing"
+          />
+        </div>
+        <p className="explain">
+          Those stretches are recorded rather than added to the list, because we can
+          see where each one starts and not yet where it ends. The rule that measures
+          a function&apos;s length needs the filler that normally follows it, and in a
+          dense stretch one function&apos;s last instruction runs straight into the
+          next function&apos;s first.{' '}
+          <strong>A wrong length is worse than a missing entry</strong> — it reaches
+          whoever picks up the work as a function with no readable body.
+        </p>
         <p className="explain">
           Where each function in the list came from, and how many of each kind have
           been rebuilt so far:

@@ -1390,4 +1390,58 @@ CREATE TABLE working_on (
 );
 `,
   },
+  {
+    id: '015-executable-gaps',
+    sql: `
+-- Executable bytes that no inventory extent claims.
+--
+-- Every discovery rule follows a REFERENCE -- a call inside a proven
+-- function, a pointer in a table -- so none of them can find a function that
+-- nothing references. Measured: the inventory covers 85.81% of the
+-- executable span. Of the 291,413 bytes it does not claim, 5,771 gaps
+-- totalling 44,529 bytes are nothing but padding, and 527 gaps totalling
+-- 246,884 bytes -- 10.93% of all executable bytes -- hold real content whose
+-- first bytes are unmistakable function prologues: \`56 8b f1 57\` is
+-- push esi; mov esi,ecx; push edi, a __thiscall member, and
+-- \`64 a1 00 00 00 00 6a ff\` is MSVC's structured-exception frame setup.
+--
+-- They are RECORDED rather than entered into the inventory, because their
+-- extents cannot yet be measured honestly. The extent rule closes a function
+-- at a ret or jmp followed by padding, and inside a dense gap one function's
+-- ret is followed immediately by the next function's first byte, so none of
+-- the 408 regions measured. A wrong size is worse than no entry: it reaches
+-- an agent as a function with no readable body, which is a failure this
+-- service has already paid for.
+--
+-- So this table is the frontier, visible and countable, instead of 10.93% of
+-- the executable being invisible because no rule happened to cover it.
+CREATE TABLE executable_gaps (
+  subject_sha TEXT    NOT NULL REFERENCES subjects(sha256),
+  va          INTEGER NOT NULL,
+  bytes       INTEGER NOT NULL,
+  -- First bytes as hex, so a reader can see what is there without the image.
+  head        TEXT    NOT NULL,
+  reason      TEXT    NOT NULL,
+  found_at    REAL    NOT NULL,
+  PRIMARY KEY (subject_sha, va)
+);
+
+-- Each run of the gap scan, so the frontier's SIZE has a history: whether
+-- unfound executable bytes are falling is a question no single reading
+-- answers.
+CREATE TABLE gap_scans (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  subject_sha    TEXT    NOT NULL,
+  at             REAL    NOT NULL,
+  text_bytes     INTEGER NOT NULL,
+  covered_bytes  INTEGER NOT NULL,
+  padding_gaps   INTEGER NOT NULL,
+  padding_bytes  INTEGER NOT NULL,
+  residue_gaps   INTEGER NOT NULL,
+  residue_bytes  INTEGER NOT NULL,
+  added          INTEGER NOT NULL
+);
+CREATE INDEX gap_scans_at ON gap_scans(subject_sha, at DESC);
+`,
+  },
 ];
