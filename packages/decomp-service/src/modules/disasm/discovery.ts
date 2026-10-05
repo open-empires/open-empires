@@ -45,7 +45,25 @@ import type {
 
 const PAD = new Set([0x90, 0xcc]);
 const TERMINATORS = new Set(['ret', 'retf', 'jmp']);
-const PROLOGUE_BYTES = new Set([0x55, 0x53, 0x56, 0x57, 0x8b, 0x83, 0x6a, 0xa1]);
+/**
+ * REMOVED: a first-byte whitelist.
+ *
+ * This was `[0x55, 0x53, 0x56, 0x57, 0x8b, 0x83, 0x6a, 0xa1]`, and anything
+ * starting with another byte was rejected as 'no-prologue' -- while this
+ * module's own contract says prologue matching is NOT used, because the
+ * subject is MSVC 6 with frame-pointer omission.
+ *
+ * Measured against the proven set, which is the only ground truth available:
+ * 468 of 3,314 byte-exact functions (14.1%) start with a byte outside that
+ * list -- 0x8a (91 of them), 0x33 (57), 0x51 (51), 0x81, 0xff, 0xe9. Every
+ * one is proven, so discovery would have refused to find any of them. It
+ * rejected 524 addresses that DO carry reference evidence on this rule.
+ *
+ * A validator that rejects known-good input is worse than no validator; this
+ * project has already lost a pass that way to a stack-balance filter. The
+ * remaining checks are the ones that rest on evidence rather than shape: an
+ * entry needs a reference, must decode, and must terminate.
+ */
 
 /** The one `__ehhandler` trampoline every try block in this subject jumps to.
  *  Subject-specific, like the address of anything else in it. */
@@ -122,7 +140,6 @@ export const body = (
 ): number | Rejection['reason'] => {
   const off = start - subject.imageBase;
   if (off < 0 || off >= subject.bytes.length) return 'no-decode';
-  if (!PROLOGUE_BYTES.has(subject.bytes[off]!)) return 'no-prologue';
   const insns = decodeSpan(d, subject, start, end - start);
   if (insns.length === 0) return 'no-decode';
   for (const i of insns) {

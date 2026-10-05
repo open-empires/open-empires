@@ -4,6 +4,7 @@ import { modules } from '../index';
 import { planBatches, type Candidate } from './batch';
 import {
   decodeFunctionBody,
+  decodeSpan,
   decodeLinear,
   instructionAt,
   loadDecoder,
@@ -11,7 +12,7 @@ import {
   type Decoder,
 } from './decoder';
 import { buildInventory } from './inventory';
-import { discover, isCompilerGenerated } from './discovery';
+import { body, discover, isCompilerGenerated } from './discovery';
 import {
   coarseShape,
   equivalentModuloIdioms,
@@ -69,6 +70,27 @@ export class DisasmImpl extends implementing(modules.Disasm) implements IDisasm 
     return Option.fromNullishOr(
       yield* this.decoding((d) => decodeFunctionBody(d, subject, fn)),
     );
+  }
+
+  *coverage(
+    subject: SubjectImage,
+    fn: FunctionExtent,
+  ): EffectGen<number, DisasmError> {
+    return yield* this.decoding((d) =>
+      decodeSpan(d, subject, fn.va, fn.size).reduce((n, i) => n + i.size, 0),
+    );
+  }
+
+  *measureExtent(
+    subject: SubjectImage,
+    va: number,
+    end: number,
+  ): EffectGen<Option.Option<number>, DisasmError> {
+    return yield* this.decoding((d) => {
+      // `body` returns a size, or a string saying why it is not a function.
+      const size = body(d, subject, va, Math.min(end, subject.textHi));
+      return typeof size === 'number' && size > 0 ? Option.some(size) : Option.none();
+    });
   }
 
   *decodeAt(

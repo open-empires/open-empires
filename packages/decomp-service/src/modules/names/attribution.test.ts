@@ -12,6 +12,7 @@ import { Option } from 'effect';
 import { attribute } from './attribution';
 import { immediates } from './references';
 import { classOfName, dataStrings } from './strings';
+import { SECTION_EXECUTABLE } from '../subject/interface';
 import type { ReferenceRole, StringReference } from './interface';
 
 const LOCK = 0x465ba0;
@@ -177,8 +178,14 @@ const strings = () => {
   return dataStrings({
     bytes,
     sections: [
-      { name: '.text', va: 0x401000, virtualSize: 0x100, rawOffset: 0, rawSize: 0x100 },
-      { name: '.data', va: 0x600000, virtualSize: 0x100, rawOffset: 0x100, rawSize: 0x100 },
+      {
+        name: '.text', va: 0x401000, virtualSize: 0x100, rawOffset: 0, rawSize: 0x100,
+        characteristics: SECTION_EXECUTABLE,
+      },
+      {
+        name: '.data', va: 0x600000, virtualSize: 0x100, rawOffset: 0x100, rawSize: 0x100,
+        characteristics: 0,
+      },
     ],
     textLo: 0x401000,
     textHi: 0x401100,

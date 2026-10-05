@@ -216,3 +216,92 @@ export const NameReportWire = Schema.Struct({
 });
 
 export const encodeNames = Schema.encodeUnknownSync(NameReportWire);
+
+/**
+ * The globals inventory.
+ *
+ * `deferrals` is on the wire beside `globals`, like `withheld` beside
+ * `names`: a client that only read the inventory would see a count of
+ * globals and no sign of the addresses whose size, name or contents the
+ * evidence refused to settle -- which is the finding most likely to be undone
+ * by someone who cannot see it.
+ *
+ * `pointers` carries BOTH numbers on purpose. `enumerated` is every dword in
+ * the data region holding an address, which is what the missing relocation
+ * table would have said; `attributed` is the subset that falls inside a
+ * global whose extent is settled. They are different claims and the second is
+ * much the smaller, so reporting one would misstate what is known.
+ */
+export const GlobalEntryWire = Schema.Struct({
+  address: Schema.Number,
+  section: Schema.String,
+  evidence: Schema.Literals(['proven-literal', 'library-symbol', 'decoded-literal', 'pointer-dword']),
+  size: Schema.OptionFromNullOr(Schema.Number),
+  sizeBasis: Schema.OptionFromNullOr(
+    Schema.Literals(['library-section', 'library-next-symbol', 'pointer-run', 'access-width']),
+  ),
+  name: Schema.OptionFromNullOr(Schema.String),
+  nameFrom: Schema.OptionFromNullOr(Schema.String),
+  holds: Schema.OptionFromNullOr(Schema.Literals(['code-pointer', 'data-pointer', 'float'])),
+  holdsBasis: Schema.OptionFromNullOr(
+    Schema.Literals(['indirect-call', 'indirect-jump', 'x87-access', 'stored-address']),
+  ),
+  pointsTo: Schema.OptionFromNullOr(Schema.Number),
+  functions: Schema.Array(Schema.Number),
+  references: Schema.Number,
+});
+
+export const GlobalsReportWire = Schema.Struct({
+  subjectSha256: Schema.String,
+  dataRegion: Schema.Array(
+    Schema.Struct({ name: Schema.String, lo: Schema.Number, hi: Schema.Number }),
+  ),
+  references: Schema.Number,
+  unconfirmedReferences: Schema.Number,
+  globals: Schema.Number,
+  byEvidence: Schema.Array(
+    Schema.Struct({
+      evidence: Schema.Literals([
+        'proven-literal', 'library-symbol', 'decoded-literal', 'pointer-dword',
+      ]),
+      globals: Schema.Number,
+    }),
+  ),
+  sized: Schema.Number,
+  bySizeBasis: Schema.Array(
+    Schema.Struct({
+      basis: Schema.Literals([
+        'library-section', 'library-next-symbol', 'pointer-run', 'access-width',
+      ]),
+      globals: Schema.Number,
+    }),
+  ),
+  named: Schema.Number,
+  holdsKnown: Schema.Array(
+    Schema.Struct({
+      holds: Schema.Literals(['code-pointer', 'data-pointer', 'float']),
+      globals: Schema.Number,
+    }),
+  ),
+  importSlotsSkipped: Schema.Number,
+  deferrals: Schema.Array(
+    Schema.Struct({
+      what: Schema.Literals(['identity', 'size', 'name', 'holds']),
+      addresses: Schema.Number,
+    }),
+  ),
+  pointers: Schema.Array(
+    Schema.Struct({
+      target: Schema.Literals(['code', 'data']),
+      enumerated: Schema.Number,
+      attributed: Schema.Number,
+    }),
+  ),
+  librarySymbols: Schema.Number,
+  libraryRefusals: Schema.Array(
+    Schema.Struct({ reason: Schema.String, count: Schema.Number }),
+  ),
+});
+
+export const encodeGlobal = Schema.encodeUnknownSync(GlobalEntryWire);
+export const encodeGlobals = Schema.encodeUnknownSync(GlobalsReportWire);

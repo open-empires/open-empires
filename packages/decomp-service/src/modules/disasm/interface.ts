@@ -237,6 +237,22 @@ export interface IDisasm {
     fn: FunctionExtent,
   ): EffectGen<Option.Option<ReadonlyArray<Instruction>>, DisasmError>;
 
+  /**
+   * How many bytes the function at `va` occupies, or None when that cannot
+   * be measured. Exposed because an entry without a measurable extent must
+   * not enter the inventory: a wrong size costs an agent its whole budget on
+   * an impossible target.
+   */
+  measureExtent(
+    subject: SubjectImage,
+    va: number,
+    /** One past the furthest this function may run -- normally the next known
+     *  entry. REQUIRED: without it the scan runs through whatever follows,
+     *  because it stops only at a terminator followed by padding. Measuring
+     *  to the end of .text returned 12,474 bytes for a 61-byte function. */
+    end: number,
+  ): EffectGen<Option.Option<number>, DisasmError>;
+
   /** The single instruction at `va`. None when nothing decodes there. */
   decodeAt(
     subject: SubjectImage,
@@ -266,6 +282,21 @@ export interface IDisasm {
     subject: SubjectImage,
     fn: FunctionExtent,
   ): EffectGen<Option.Option<Fingerprint>, DisasmError>;
+
+  /**
+   * How many of a function's bytes the decode actually covers.
+   *
+   * `decodeFunction` answers only yes-or-no, and for the handful of entries
+   * it refuses that is not enough to act on. The number distinguishes the two
+   * causes: coverage that stops well short means DATA inside the body -- a
+   * switch jump table, which the gate proves by bytes and the disassembler
+   * cannot read -- while coverage overshooting by a few bytes means the
+   * recorded size is wrong. One is a limit to live with, the other is a bug.
+   */
+  coverage(
+    subject: SubjectImage,
+    fn: FunctionExtent,
+  ): EffectGen<number, DisasmError>;
 
   /**
    * Enumerate function entries from the call graph and from pointer tables,

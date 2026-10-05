@@ -61,7 +61,17 @@ export interface Section {
   readonly virtualSize: number;
   readonly rawOffset: number;
   readonly rawSize: number;
+  /**
+   * The section's own flags. Carried so "is this section code" is read from
+   * the bytes rather than from a list of section names written down
+   * somewhere: `THIS_COD` is executable and is not called `.text`, and the
+   * globals inventory must not treat a SafeDisc code section as data.
+   */
+  readonly characteristics: number;
 }
+
+/** IMAGE_SCN_MEM_EXECUTE. */
+export const SECTION_EXECUTABLE = 0x20000000;
 
 /**
  * One `@comp.id` record of the subject's Rich header: a tool that produced it,

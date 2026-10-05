@@ -2,6 +2,7 @@ import { interfaces } from 'effective-modules';
 import type { IDb } from './db/interface';
 import type { IGate } from './gate/interface';
 import type { IDisasm } from './disasm/interface';
+import type { IDiscovery } from './discovery/interface';
 import type { IRegistry } from './registry/interface';
 import type { IWork } from './work/interface';
 import type { IMetrics } from './metrics/interface';
@@ -12,6 +13,7 @@ import type { IPortable } from './portable/interface';
 import type { IReloc } from './reloc/interface';
 import type { INames } from './names/interface';
 import type { IImportNames } from './import-names/interface';
+import type { IGlobals } from './globals/interface';
 
 /**
  * The decompilation service.
@@ -25,6 +27,7 @@ export enum Modules {
   Db = 'Db',
   Subject = 'Subject',
   Disasm = 'Disasm',
+  Discovery = 'Discovery',
   Gate = 'Gate',
   Work = 'Work',
   Registry = 'Registry',
@@ -45,6 +48,13 @@ export enum Modules {
    *  objects are already identified in the image. The library states which
    *  symbol each call site targets, so no name is inferred from a call shape. */
   ImportNames = 'ImportNames',
+  /** The other half of the inventory: the subject's global variables, as
+   *  declared variables rather than raw addresses. The browser build cannot
+   *  resolve `*(Flag **)0x684480` -- there is no address 0x684480 in
+   *  WebAssembly -- and the binary carries no relocation table to say which
+   *  dwords in its data are addresses, so the inventory has to establish it
+   *  from evidence. */
+  Globals = 'Globals',
   /** The one-time move of the Python tooling's files into this database. Not
    *  part of serving; it runs once, from `src/import.ts`. */
   Legacy = 'Legacy',
@@ -53,9 +63,9 @@ export enum Modules {
 export const modules = interfaces<
   Modules,
   {
-    Db: IDb; Subject: ISubject; Disasm: IDisasm; Gate: IGate;
+    Db: IDb; Subject: ISubject; Disasm: IDisasm; Discovery: IDiscovery; Gate: IGate;
     Work: IWork; Registry: IRegistry; Metrics: IMetrics; Legacy: ILegacy;
     Compose: ICompose; Portable: IPortable; Reloc: IReloc; Names: INames;
-    ImportNames: IImportNames;
+    ImportNames: IImportNames; Globals: IGlobals;
   }
 >(Modules);

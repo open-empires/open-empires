@@ -852,4 +852,319 @@ SELECT r.subject_sha, r.slot, r.site AS call_site,
  WHERE b.api IS NOT NULL;
 `,
   },
+  {
+    id: '007-rejected-entries',
+    sql: `
+-- An address that is NOT a function entry, recorded as a fact.
+--
+-- Three rows in \`functions\` came from \`discover.py\`, which no longer
+-- exists, labelled \`discovered_by='inventory'\`. One of them, 0x5a4c34,
+-- decodes to \`inc ebp; hlt\` -- a privileged halt instruction, so those
+-- bytes are data. It sits INSIDE the real function at 0x5a4afa, whose
+-- prologue is \`push ebp; mov ebp,esp; sub esp,0x28; mov [ebp-0x20],ecx\`,
+-- a textbook __thiscall member.
+--
+-- A spurious entry is not merely noise. It does three things:
+--   1. it bounds its PREDECESSOR's extent measurement, so the real function
+--      measures as 'no-terminator' and cannot be sized at all
+--   2. the predecessor's wrong recorded size then cuts mid-instruction, and
+--      \`decodeFunctionBody\` demands an exact cover, so the function is
+--      handed to agents with an EMPTY disassembly -- unworkable, with no
+--      error anywhere
+--   3. it inflates the denominator, so coverage reads lower than it is
+--
+-- DELETING the row does not fix it. The evidence that produced the address
+-- is still in the bytes, so the next producer re-adds it; that is exactly
+-- what happened to these three. A rejection has to be a stored fact the
+-- producers consult, carrying the reason and the bytes that justify it, so
+-- it survives re-discovery and can be audited or reversed.
+CREATE TABLE rejected_entries (
+  subject_sha  TEXT    NOT NULL,
+  va           INTEGER NOT NULL,
+  reason       TEXT    NOT NULL,   -- why it is not an entry
+  evidence     TEXT    NOT NULL,   -- the decode, verbatim, so it is checkable
+  rejected_at  REAL    NOT NULL,
+  PRIMARY KEY (subject_sha, va)
+);
+
+-- Enforced HERE rather than in each producer.
+--
+-- There are two writers of \`functions\` today (discovery and the legacy
+-- import) and the next one is a matter of time. Asking each to remember a
+-- NOT EXISTS clause is how a rule survives in two places and then in one:
+-- the producer that forgets silently resurrects every rejection. A BEFORE
+-- INSERT trigger makes the rule a property of the table, so a writer cannot
+-- fail to honour it, including one written later by someone who has never
+-- read this comment.
+--
+-- RAISE(IGNORE) skips the row and lets the rest of the statement proceed,
+-- which is the same semantics as ON CONFLICT DO NOTHING. The skip is not
+-- hidden: \`rejected_entries\` is the record of what was skipped and why,
+-- and the discovery report counts its own refusals separately.
+CREATE TRIGGER functions_honour_rejections
+BEFORE INSERT ON functions
+WHEN EXISTS (
+  SELECT 1 FROM rejected_entries r
+   WHERE r.subject_sha = NEW.subject_sha AND r.va = NEW.va
+)
+BEGIN
+  SELECT RAISE(IGNORE);
+END;
+`,
+  },
+  {
+    id: '008-globals',
+    sql: `
+-- ---------------------------------------------------------- the globals half
+--
+-- 6,986 functions were catalogued and no global variable was. The browser
+-- build cannot be finished without them, and the reason is specific.
+--
+-- The reconstructions reach global state by raw address -- a line reads
+-- #define g_flag (*(Flag **)0x684480), meaning "the pointer stored at
+-- 0x684480". Natively that is correct and it is part of what makes the
+-- compiled bytes match the shipped game, so those lines stay in the proven
+-- sources. For WebAssembly there is no address 0x684480. Mapping the whole
+-- data region onto one extracted block works for plain data and FAILS for
+-- any dword in that data which is itself an address, because moving the
+-- block changes what the address means.
+--
+-- The subject carries NO relocation table: IMAGE_DIRECTORY_ENTRY_BASERELOC
+-- is rva 0, size 0. So nothing in the binary says which dwords are
+-- addresses, and enumerating them is reconstructing the table the linker
+-- threw away. 13,259 aligned dwords in the data region hold an address
+-- inside the executable span, and 1,875 hold one inside the data region.
+--
+-- WHY THIS IS SHAPED LIKE 004-recovered-names
+-- -------------------------------------------
+-- globals holds the ANSWER for each address; the three tables around it
+-- hold the EVIDENCE the answer was read out of, and global_deferrals holds
+-- every question the evidence did not settle, with its reason. That split is
+-- the one functions.name and string_references already use, for the same
+-- reason: a withheld answer is evidence, not an absence, and a reader with no
+-- reason beside it has every incentive to "fix" it by choosing one.
+--
+-- NOTHING HERE STORES WHETHER A FUNCTION IS PROVEN. The strength of a
+-- literal depends on whether its containing function is byte-exact UNDER THE
+-- CONFIGURATION IN FORCE, which is what the proven view computes. A stored
+-- flag would be a second answer that nothing retires when the compiler
+-- changes -- the exact failure that shipped 6,953 blocks of which 1,450 were
+-- still proved. So global_references stores the containing function and
+-- global_evidence joins.
+
+-- One confirmed reference from an instruction to a data address.
+--
+-- A row asserts that the instruction at site names address in its
+-- operands AND that the value is a 32-bit field of the instruction's own
+-- bytes. The second half is not decoration: a direct branch is printed as its
+-- computed absolute target, which appears nowhere in the encoding, so without
+-- it a branch target would be filed as a global.
+CREATE TABLE global_references (
+    subject_sha TEXT NOT NULL REFERENCES subjects(sha256),
+    site        INTEGER NOT NULL,
+    address     INTEGER NOT NULL,
+    -- absolute  | [0x684480] alone: a scalar access of width bytes.
+    -- indexed   | [eax + 0x684480]: the address is an ARRAY BASE and the
+    --           | extent is not stated.
+    -- immediate | push 0x684480: the address is taken and nothing is read.
+    form        TEXT NOT NULL,
+    -- Bytes the instruction accesses, from its own operand size prefix. Null
+    -- for an immediate, which reads nothing.
+    width       INTEGER,
+    mnemonic    TEXT NOT NULL,
+    -- The operand text, so the claim is checkable against the disassembly
+    -- rather than taken on trust.
+    op_str      TEXT NOT NULL,
+    -- Null: the site is in a stretch of the executable span the inventory
+    -- attributes to no function. Still a fact about bytes, but nothing ties
+    -- it to a function that could be proven.
+    containing_function INTEGER,
+    PRIMARY KEY (subject_sha, site, address, form)
+);
+CREATE INDEX global_references_address ON global_references(subject_sha, address);
+CREATE INDEX global_references_fn ON global_references(subject_sha, containing_function);
+
+-- Operand literals the decoder printed that the instruction does not encode.
+-- None becomes evidence. Kept because "the derivation saw this and refused
+-- it" and "the derivation never saw this" are different answers.
+CREATE TABLE global_reference_refusals (
+    subject_sha TEXT NOT NULL REFERENCES subjects(sha256),
+    site        INTEGER NOT NULL,
+    address     INTEGER NOT NULL,
+    mnemonic    TEXT NOT NULL,
+    op_str      TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    PRIMARY KEY (subject_sha, site, address)
+);
+
+-- A data symbol a CRT library's own relocation table names in the image.
+--
+-- address is field_value - addend, and both are stored so the
+-- subtraction is re-checkable. It is not optional: a Dir32 field holds
+-- symbol + addend, so _iob + 64 and _iob + 32 are two references to ONE
+-- global, and read without subtracting they become two globals at addresses
+-- _iob does not occupy. The same correction puts _XcptActTab at 0x682670
+-- rather than 0x682678.
+CREATE TABLE global_library_symbols (
+    subject_sha       TEXT NOT NULL REFERENCES subjects(sha256),
+    address           INTEGER NOT NULL,
+    -- As the library's symbol table spells it. A CRT global is __pctype in
+    -- the object and _pctype in C; the stored form is the one the evidence
+    -- carries, so no name here is a transformation of another.
+    name              TEXT NOT NULL,
+    library           TEXT NOT NULL,
+    member            TEXT NOT NULL,
+    -- external-relocation | the object referred to a symbol it does not
+    --                     | define, so the patched field gives the address.
+    -- placed-data-section | the object's own data section was located in the
+    --                     | image, so every symbol in it has an address AND
+    --                     | a size.
+    route             TEXT NOT NULL,
+    section_index     INTEGER NOT NULL,
+    relocation_offset INTEGER,
+    field_value       INTEGER,
+    addend            INTEGER,
+    -- The byte of the symbol this reference reaches. Non-zero is a lower
+    -- bound on the symbol's size independent of the library's own table.
+    offset_reached    INTEGER NOT NULL,
+    size              INTEGER,
+    -- library-section     | alone in its section, so the section's size IS
+    --                     | its size.
+    -- library-next-symbol | bounded by the next symbol. An UPPER BOUND: the
+    --                     | gap may include alignment padding.
+    size_basis        TEXT,
+    PRIMARY KEY (subject_sha, address, name, member, route)
+);
+CREATE INDEX global_library_symbols_name ON global_library_symbols(subject_sha, name);
+
+-- Every library relocation or section placement that produced no name, and
+-- why. A count answers "how many"; only the rows answer "which, and why",
+-- which is what is needed when a global has no name and somebody wants to
+-- know whether that is an absence or a refusal.
+CREATE TABLE global_library_refusals (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_sha       TEXT NOT NULL REFERENCES subjects(sha256),
+    library           TEXT NOT NULL,
+    member            TEXT NOT NULL,
+    section_index     INTEGER NOT NULL,
+    relocation_offset INTEGER,          -- null: the refusal is of a section
+    symbol            TEXT,
+    reason            TEXT NOT NULL
+);
+CREATE INDEX global_library_refusals_member
+    ON global_library_refusals(subject_sha, library, member);
+
+-- An aligned dword in the data region holding a valid address: the weakest
+-- evidence this inventory admits, and the one the browser build cannot do
+-- without, because this IS the missing relocation table.
+--
+-- The weakness is stored rather than hidden. section and target_section
+-- are both kept, so a reader can see that 166 candidates sit in .rsrc,
+-- where a dword that looks like an address is almost certainly a resource
+-- offset -- and 0x6ACFC0 is both a plausible byte count and an address
+-- inside .data.
+--
+-- run_start and run_length are what make this useful. A vtable is a run
+-- of consecutive aligned dwords all pointing into code; a run whose first
+-- address the code NAMES is a table the program declares, and 214 such runs
+-- account for 11,354 of the 13,259 code-valued dwords.
+CREATE TABLE global_pointer_candidates (
+    subject_sha    TEXT NOT NULL REFERENCES subjects(sha256),
+    address        INTEGER NOT NULL,
+    value          INTEGER NOT NULL,
+    section        TEXT NOT NULL,
+    target_section TEXT NOT NULL,
+    run_start      INTEGER NOT NULL,
+    run_length     INTEGER NOT NULL,
+    PRIMARY KEY (subject_sha, address)
+);
+CREATE INDEX global_pointer_candidates_run
+    ON global_pointer_candidates(subject_sha, run_start);
+
+-- One row per global: the answer, from all four kinds of evidence.
+CREATE TABLE globals (
+    subject_sha TEXT NOT NULL REFERENCES subjects(sha256),
+    address     INTEGER NOT NULL,
+    -- From the subject's own section table, so a SafeDisc data section is
+    -- named rather than lumped in with .data.
+    section     TEXT NOT NULL,
+    -- proven-literal   | a literal in a function whose bytes we reproduce
+    --                  | exactly. A fact about verified bytes.
+    -- library-symbol   | a Dir32 relocation in a confirmed library object.
+    -- decoded-literal  | the same literal, in a function not yet proven.
+    -- pointer-dword    | only the value scan. The weakest.
+    evidence    TEXT NOT NULL,
+    size        INTEGER,
+    -- library-section | library-next-symbol | pointer-run | access-width
+    size_basis  TEXT,
+    name        TEXT,
+    -- The library member whose relocation named it.
+    name_from   TEXT,
+    -- code-pointer | data-pointer | float. Null means nothing says -- which
+    -- is NOT the same as "an integer", and the reason is in
+    -- global_deferrals.
+    holds       TEXT,
+    -- indirect-call | indirect-jump | x87-access | stored-address. The
+    -- instruction outranks the bytes: call dword ptr [X] says X holds a
+    -- code pointer whatever X contained at the moment the dump was taken.
+    holds_basis TEXT,
+    points_to   INTEGER,
+    PRIMARY KEY (subject_sha, address)
+);
+CREATE INDEX globals_section ON globals(subject_sha, section);
+CREATE INDEX globals_name ON globals(subject_sha, name);
+
+-- Everything the evidence does not settle, with the reason.
+--
+-- identity is an address that gets no globals row at all -- a declared
+-- import slot, or an address in no section. The other three are questions
+-- about a global that does exist.
+CREATE TABLE global_deferrals (
+    subject_sha TEXT NOT NULL REFERENCES subjects(sha256),
+    address     INTEGER NOT NULL,
+    what        TEXT NOT NULL,   -- identity | size | name | holds
+    reason      TEXT NOT NULL,
+    PRIMARY KEY (subject_sha, address, what)
+);
+
+-- The strength of each reference, computed and never stored.
+--
+-- A literal inside a byte-exact function is a fact about bytes this project
+-- has reproduced; the same literal inside an unproven reconstruction depends
+-- on that decode being right. Which one a row is depends on the
+-- configuration in force, so it is a join against proven -- changing the
+-- compiler re-ranks every reference at once, with no flag to set.
+CREATE VIEW global_evidence AS
+SELECT r.subject_sha, r.address, r.site, r.form, r.width, r.mnemonic, r.op_str,
+       r.containing_function,
+       CASE
+         WHEN r.containing_function IS NULL THEN 'unattributed-literal'
+         WHEN EXISTS (SELECT 1 FROM proven p
+                       WHERE p.subject_sha = r.subject_sha
+                         AND p.va = r.containing_function) THEN 'proven-literal'
+         ELSE 'decoded-literal'
+       END AS strength
+  FROM global_references r;
+
+-- Which functions touch each global, and how hard the evidence is.
+CREATE VIEW global_touched_by AS
+SELECT e.subject_sha, e.address, e.containing_function AS va,
+       COUNT(*) AS sites,
+       MAX(e.strength = 'proven-literal') AS proven
+  FROM global_evidence e
+ WHERE e.containing_function IS NOT NULL
+ GROUP BY e.subject_sha, e.address, e.containing_function;
+
+-- Addresses BOTH this inventory and the import map answer.
+--
+-- There must be none: an import slot gets no globals row, because
+-- import_slots already answers it and 51 slots serve several APIs, which no
+-- single global can express. A non-empty result means the two have started
+-- double-counting.
+CREATE VIEW global_import_slot_overlap AS
+SELECT g.subject_sha, g.address
+  FROM globals g
+  JOIN import_slots s ON s.subject_sha = g.subject_sha AND s.slot = g.address;
+`,
+  },
 ];

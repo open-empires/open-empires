@@ -37,24 +37,65 @@ const sources = (dir: string): string[] =>
 const stripComments = (text: string): string =>
   text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 
-/** A backtick string that BEGINS with a statement keyword. Interpolations
+/** A string literal that BEGINS with a statement keyword. Interpolations
  *  become `?` so a generated IN-list still parses; a statement whose SHAPE
  *  depends on its interpolation cannot be checked this way and is skipped
  *  rather than guessed at. */
 // `WITH` must look like a CTE: the bare word matched the English "with" in a
 // prose template and reported it as broken SQL.
-const STATEMENT =
-  /`(\s*(?:SELECT|INSERT|UPDATE|DELETE|WITH\s+(?:RECURSIVE\s+)?\w+\s*(?:\(|AS\b))[^`]*)`/gis;
+const KEYWORD =
+  '(?:SELECT|INSERT|UPDATE|DELETE|WITH\\s+(?:RECURSIVE\\s+)?\\w+\\s*(?:\\(|AS\\b))';
+
+/**
+ * ALL THREE quote styles, because for a while this checked only backticks and
+ * said nothing about the rest. It extracted 106 statements while the package
+ * held 153: every single-quoted one -- 47 of them, 31% -- went unchecked by
+ * the test whose whole purpose is that an unchecked statement took `submit`
+ * down for 75 minutes. A one-line query reaching for the nearest quote mark
+ * was enough to leave the harness.
+ *
+ * A guard with a silent blind spot is worse than a missing one: it reports a
+ * pass over the part it can see and nobody asks about the rest.
+ */
+const STATEMENTS: ReadonlyArray<RegExp> = [
+  new RegExp('`(\\s*' + KEYWORD + '[^`]*)`', 'gis'),
+  new RegExp("'(\\s*" + KEYWORD + "[^']*)'", 'gis'),
+  new RegExp('"(\\s*' + KEYWORD + '[^"]*)"', 'gis'),
+];
+
+/**
+ * A `${cond ? 'A' : 'B'}` interpolation changes the statement's SHAPE, not a
+ * bound value. Substituting `?` for it produced `WHERE x = ??` and reported a
+ * working query as broken. Skipping such statements instead would be worse:
+ * the globals module reaches the database through two of them, and a skipped
+ * statement is one the harness has stopped checking without saying so.
+ *
+ * So each ternary is expanded into BOTH of its branches, and every resulting
+ * statement is checked. A conditional clause is exactly where a column name
+ * typo hides, because only one of the two shapes is exercised at a time.
+ */
+const TERNARY = /\$\{[^}?]*\?\s*(['"`])([^'"`]*)\1\s*:\s*(['"`])([^'"`]*)\3\s*\}/;
+
+const shapes = (sql: string, depth = 0): string[] => {
+  const m = TERNARY.exec(sql);
+  if (m === null || depth >= 4) return [sql];
+  return [m[2]!, m[4]!].flatMap((branch) =>
+    shapes(sql.slice(0, m.index) + branch + sql.slice(m.index + m[0].length), depth + 1),
+  );
+};
 
 const extract = (text: string): string[] => {
   const out: string[] = [];
-  for (const m of stripComments(text).matchAll(STATEMENT)) {
-    const filled = m[1]!.replace(/\$\{[^}]*\}/g, '?');
+  const stripped = stripComments(text);
+  for (const m of STATEMENTS.flatMap((re) => [...stripped.matchAll(re)])) {
+  for (const variant of shapes(m[1]!)) {
+    const filled = variant.replace(/\$\{[^}]*\}/g, '?');
     if (filled.includes('${')) continue;
     // An interpolated TABLE name cannot become a placeholder -- the shape
     // depends on the interpolation, so there is nothing to check.
     if (/\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+\?/i.test(filled)) continue;
     out.push(filled);
+  }
   }
   return out;
 };
@@ -82,7 +123,10 @@ test('every SQL statement compiles against the live schema', () => {
 
   // A guard that checks nothing passes silently, which is the failure it
   // exists to prevent.
-  expect(checked).toBeGreaterThan(40);
+  // Was 40 while the extractor saw only backticks. The package holds 153
+  // statements across the three quote styles; a floor well under that still
+  // catches an extractor that has stopped matching.
+  expect(checked).toBeGreaterThan(140);
   if (failures.length > 0) {
     throw new Error(
       `${failures.length} of ${checked} statements do not compile:\n  ` +

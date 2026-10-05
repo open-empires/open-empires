@@ -57,6 +57,7 @@ export const parsePeImage = (bytes: Uint8Array): Result.Result<PeImage, SubjectP
       virtualSize: view.getUint32(o + 8, true),
       rawOffset: view.getUint32(o + 20, true),
       rawSize: view.getUint32(o + 16, true),
+      characteristics: view.getUint32(o + 36, true),
     });
   }
   return Result.succeed({ bytes, view, imageBase, sections, importDirectoryRva });

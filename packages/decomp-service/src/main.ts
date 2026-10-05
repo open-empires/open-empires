@@ -26,7 +26,9 @@ import { modules } from './modules';
 import { ComposeImpl } from './modules/compose/impl';
 import { DbImpl, handle as dbHandle } from './modules/db/impl';
 import { DisasmImpl } from './modules/disasm/impl';
+import { DiscoveryImpl } from './modules/discovery/impl';
 import { GateImpl } from './modules/gate/impl';
+import { GlobalsImpl } from './modules/globals/impl';
 import { ImportNamesImpl } from './modules/import-names/impl';
 import { LegacyImpl } from './modules/legacy/impl';
 import { NamesImpl } from './modules/names/impl';
@@ -39,8 +41,8 @@ import { WorkImpl } from './modules/work/impl';
 import { SUBJECT_FLAGS, SWEEP_FLAG_SETS } from './modules/gate/interface';
 import type { PortState } from './modules/portable/interface';
 import {
-  encodeAgents, encodeComposition, encodeNames, encodeSweep, encodeVerdict,
-  encodeWorkItems,
+  encodeAgents, encodeComposition, encodeGlobal, encodeGlobals, encodeNames, encodeSweep,
+  encodeVerdict, encodeWorkItems,
 } from './api/wire';
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -56,6 +58,8 @@ export const layerLive = pipe(
   Layer.provideMerge(NamesImpl.Layer),
   Layer.provideMerge(ImportNamesImpl.Layer),
   Layer.provideMerge(GateImpl.Layer),
+  Layer.provideMerge(GlobalsImpl.Layer),
+  Layer.provideMerge(DiscoveryImpl.Layer),
   Layer.provideMerge(DisasmImpl.Layer),
   Layer.provideMerge(SubjectImpl.Layer),
   Layer.provideMerge(MetricsImpl.Layer),
@@ -297,6 +301,177 @@ const routes = async (req: Request): Promise<Response> => {
     );
   }
 
+  // /api/discovery              how the inventory is growing, and from what
+  // /api/discovery/expand       harvest entries from every proven function
+  // /api/discovery/remeasure    check recorded sizes against the bytes
+  //
+  // Discovery used to be a one-off script run by hand, which is how its
+  // whitelist of eight prologue bytes survived long enough to reject 14% of
+  // our own proven functions unseen. Here it is a capability with a surface:
+  // what it found, what evidence found it, and what it set aside and why.
+  if (seg[0] === 'api' && seg[1] === 'discovery' && seg.length <= 3) {
+    return handle(
+      provided(
+        Effect.gen(function* () {
+          const d = yield* modules.Discovery;
+          const db = yield* modules.Db;
+
+          if (seg[2] === 'expand') {
+            const rounds = typeof body.rounds === 'number' ? body.rounds : 4;
+            const reports = yield* d.expandAll(rounds);
+            return {
+              rounds: reports.length,
+              added: reports.reduce((n, r) => n + r.added, 0),
+              reports,
+            };
+          }
+
+          if (seg[2] === 'remeasure') {
+            // No `vas` means every entry no proof depends on: the whole
+            // question of whether the inventory's sizes describe the bytes.
+            const vas = Array.isArray(body.vas)
+              ? body.vas.filter((v): v is number => typeof v === 'number')
+              : (yield* db.all(
+                  `SELECT f.va AS va FROM functions f
+                    WHERE NOT EXISTS (SELECT 1 FROM proven p WHERE p.va = f.va)
+                    ORDER BY f.va`,
+                )).map((r: unknown) => (r as { va: number }).va);
+            const results = yield* d.remeasure(vas, body.apply === true);
+            // Three DISJOINT outcomes. Reporting `agreed` as
+            // `checked - disagreed` counted the unmeasurable as agreeing,
+            // which read as "3 checked, 3 agreed" over a set where two
+            // addresses had produced no measurement at all.
+            const unmeasurable = results.filter((r) => Option.isNone(r.measured));
+            const disagreed = results.filter(
+              (r) => Option.isSome(r.measured) && r.measured.value !== r.recorded,
+            );
+            const hex = (n: number) => `0x${n.toString(16)}`;
+            return {
+              checked: results.length,
+              agreed: results.length - disagreed.length - unmeasurable.length,
+              disagreed: disagreed.length,
+              applied: results.filter((r) => r.applied).length,
+              // Named, not counted: an address whose extent cannot be measured
+              // is a question for the decoder, and a bare total asks nobody.
+              unmeasurable: unmeasurable.slice(0, 200).map((r) => ({
+                va: hex(r.va),
+                recorded: r.recorded,
+                boundedBy: hex(r.nextEntry),
+              })),
+              unmeasurableTotal: unmeasurable.length,
+              disagreements: disagreed.slice(0, 200).map((r) => ({
+                va: hex(r.va),
+                recorded: r.recorded,
+                measured: Option.getOrNull(r.measured),
+                boundedBy: hex(r.nextEntry),
+                applied: r.applied,
+              })),
+            };
+          }
+
+          // An address judged not to be a function entry. Stored with the
+          // decode that justifies it, because a deletion does not survive the
+          // next producer pass -- three rows came back that way.
+          if (seg[2] === 'reject') {
+            const entries = Array.isArray(body.entries)
+              ? body.entries.flatMap((e) => {
+                  const o = e as { va?: unknown; reason?: unknown };
+                  return typeof o.va === 'number' && typeof o.reason === 'string'
+                    ? [{ va: o.va, reason: o.reason }]
+                    : [];
+                })
+              : [];
+            if (entries.length === 0) {
+              return {
+                ok: false,
+                error: 'body.entries must hold { va: number, reason: string } objects',
+              };
+            }
+            const outcomes = yield* d.reject(entries);
+            return {
+              accepted: outcomes.filter((o) => o.accepted).length,
+              refused: outcomes
+                .filter((o) => !o.accepted)
+                .map((o) => ({
+                  va: `0x${o.va.toString(16)}`,
+                  because: Option.getOrNull(o.refusedBecause),
+                })),
+              // The point of a rejection: the predecessor it was truncating
+              // can now be measured.
+              unblocked: outcomes
+                .flatMap((o) => o.unblocks)
+                .map((va) => `0x${va.toString(16)}`),
+            };
+          }
+
+          // How many inventory entries can an agent actually work on? An
+          // entry whose recorded size cuts mid-instruction decodes to
+          // nothing, so the agent is handed an empty listing and the address
+          // can never leave the queue. Nothing errors, so nothing asks.
+          if (seg[2] === 'workability') {
+            const a = yield* d.auditWorkability(body.repair === true);
+            return {
+              at: a.at,
+              entries: a.entries,
+              workable: a.workable,
+              undecodable: a.undecodable.length,
+              repaired: a.undecodable.filter((x) => x.repaired).length,
+              // Split out, because a PROVEN entry that does not decode is a
+              // different and worse problem: the proof was taken against a
+              // span the decoder now refuses.
+              undecodableProven: a.undecodable.filter((u) => u.proven).length,
+              repairable: a.undecodable.filter(
+                (u) => !u.proven && Option.isSome(u.measured),
+              ).length,
+              worst: a.undecodable.slice(0, 50).map((u) => ({
+                va: `0x${u.va.toString(16)}`,
+                recorded: u.size,
+                measured: Option.getOrNull(u.measured),
+                proven: u.proven,
+                repaired: u.repaired,
+                covered: u.covered,
+              })),
+            };
+          }
+
+          if (seg[2] === 'rejections') {
+            const rows = yield* d.rejections();
+            return {
+              total: rows.length,
+              rejections: rows.map((r) => ({
+                va: `0x${r.va.toString(16)}`,
+                reason: r.reason,
+                evidence: r.evidence,
+              })),
+            };
+          }
+
+          if (seg[2] !== undefined) {
+            return { ok: false, error: `unknown discovery action ${seg[2]}` };
+          }
+
+          // Derived by query, never a stored scalar: the inventory IS the
+          // answer to "how was each function found".
+          return {
+            byEvidence: yield* db.all(
+              `SELECT COALESCE(discovered_by, 'pre-existing') AS evidence,
+                      COUNT(*) AS functions,
+                      SUM(CASE WHEN EXISTS
+                        (SELECT 1 FROM proven p WHERE p.va = f.va)
+                        THEN 1 ELSE 0 END) AS proven
+                 FROM functions f
+                GROUP BY evidence ORDER BY functions DESC`,
+            ),
+            total: yield* db.one('SELECT COUNT(*) AS functions FROM functions'),
+            rejected: yield* db.one(
+              'SELECT COUNT(*) AS addresses FROM rejected_entries',
+            ),
+          };
+        }),
+      ) as Effect.Effect<unknown, { readonly _tag: string }, never>,
+    );
+  }
+
   // /api/names            what is recorded
   // /api/names/recover    read it out of the bytes again
   //
@@ -323,6 +498,56 @@ const routes = async (req: Request): Promise<Response> => {
                   'call /api/names/recover',
               }
             : { report: encodeNames(found.value) };
+        }),
+      ) as Effect.Effect<unknown, { readonly _tag: string }, never>,
+    );
+  }
+
+  // /api/globals                   the inventory as recorded
+  // /api/globals/rebuild           re-derive it now
+  // /api/globals/deferrals         every question the evidence does not settle
+  // /api/globals/0x684480          one global and the functions that touch it
+  //
+  // Re-deriving is also a timer below, because the inventory CONVERGES: each
+  // new proof turns the literals in one more function from a decode into a
+  // fact about verified bytes. A route exists so it can be forced after an
+  // ingest without waiting for the tick.
+  if (seg[0] === 'api' && seg[1] === 'globals' && seg.length <= 3) {
+    return handle(
+      provided(
+        Effect.gen(function* () {
+          const globals = yield* modules.Globals;
+          if (seg[2] === 'rebuild') return { report: encodeGlobals(yield* globals.rebuild()) };
+          if (seg[2] === 'deferrals') {
+            const deferred = yield* globals.deferrals();
+            return {
+              deferrals: deferred.length,
+              addresses: deferred.map((d) => ({
+                address: d.address,
+                what: d.what,
+                reason: d.reason,
+              })),
+            };
+          }
+          if (seg[2] !== undefined) {
+            const address = Number.parseInt(seg[2], seg[2].startsWith('0x') ? 16 : 10);
+            if (!Number.isFinite(address)) {
+              return { ok: false, error: `${seg[2]} is not an address` };
+            }
+            const found = yield* globals.at(address);
+            return Option.isNone(found)
+              ? { global: null, note: 'no evidence places a global at that address' }
+              : { global: encodeGlobal(found.value) };
+          }
+          const found = yield* globals.recorded();
+          return Option.isNone(found)
+            ? {
+                report: null,
+                note:
+                  'no globals have been inventoried for the subject currently in force; ' +
+                  'call /api/globals/rebuild',
+              }
+            : { report: encodeGlobals(found.value) };
         }),
       ) as Effect.Effect<unknown, { readonly _tag: string }, never>,
     );
@@ -379,6 +604,85 @@ const supervise = () => {
 
   // Expiring a lease is how work from a dead agent returns to the queue.
   // Nothing notices an agent died; the lease simply runs out.
+  // Discovery is a consequence of progress, not a chore. Every proof makes
+  // its call targets verified facts, so the inventory grows on its own as the
+  // proven set does. It was previously a one-off script nobody ran, which is
+  // how 385 functions sat undiscovered in the data for the whole project.
+  every('discovery', 600, async () => {
+    const reports = await Effect.runPromise(
+      provided(
+        Effect.gen(function* () {
+          const d = yield* modules.Discovery;
+          return yield* d.expandAll(3);
+        }),
+      ),
+    );
+    const added = reports.reduce((a, r) => a + r.added, 0);
+    if (added > 0) console.log(`[discovery] ${added} new function(s) entered the inventory`);
+  });
+
+  // The portable tree is a CONSEQUENCE of the proven set, like discovery.
+  // It had been run once, covering 2,614 files while 3,314 were proven, so
+  // ~700 recoveries had never been converted and nothing closed the gap as
+  // the set grew. generate() always converts everything in force; it just
+  // needed an owner.
+  every('portable', 900, async () => {
+    const r = await Effect.runPromise(
+      provided(
+        Effect.gen(function* () {
+          const p = yield* modules.Portable;
+          return yield* p.generate(Option.none());
+        }),
+      ),
+    );
+    const n = (r as { converted?: number }).converted ?? 0;
+    if (n > 0) console.log(`[portable] ${n} reconstruction(s) converted for the browser build`);
+  });
+
+  // Naming import slots is also a consequence of the proven set: every CRT
+  // function identified makes its library object's relocation table readable,
+  // and those relocations name the Windows APIs the object calls. Run once by
+  // hand it named 10 slots; it should converge as identification grows rather
+  // than wait for someone to re-run it.
+  every('import-names', 1800, async () => {
+    const r = await Effect.runPromise(
+      provided(
+        Effect.gen(function* () {
+          const n = yield* modules.ImportNames;
+          return yield* n.nameImportSlots();
+        }),
+      ),
+    );
+    // `slotsNamed` is the LIST of slots it named, not a count.
+    const named = r.slotsNamed.length;
+    if (named > 0) {
+      console.log(`[import-names] ${named} slot(s) named from library relocations: ` +
+        r.slotsNamed.map((s) => `0x${s.slot.toString(16).toUpperCase()}=${s.name}`).join(' '));
+    }
+  });
+
+  // The globals inventory is a CONSEQUENCE of the proven set, like discovery
+  // and the portable tree. Every new proof turns the literal addresses in one
+  // more function from a decode into a fact about bytes this project
+  // reproduces, so the inventory's strongest evidence class grows on its own
+  // -- and an inventory derived once would describe a proven set that no
+  // longer exists.
+  every('globals', 1200, async () => {
+    const report = await Effect.runPromise(
+      provided(
+        Effect.gen(function* () {
+          const globals = yield* modules.Globals;
+          return yield* globals.rebuild();
+        }),
+      ),
+    );
+    const proven = report.byEvidence.find((e) => e.evidence === 'proven-literal')?.globals ?? 0;
+    console.log(
+      `[globals] ${report.globals} global(s), ${proven} evidenced by a proven function, ` +
+        `${report.named} named, ${report.sized} sized`,
+    );
+  });
+
   every('reaper', 30, async () => {
     const freed = await Effect.runPromise(
       provided(
