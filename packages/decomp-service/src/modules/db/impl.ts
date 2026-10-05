@@ -180,6 +180,10 @@ export class DbImpl extends implementing(modules.Db) implements IDb {
       ).map((r) => [r.id, r.sql_sha256]),
     );
 
+    // Hashes `sql` only. `verify` is a CHECK on the change, not the change
+    // itself, so correcting a wrong check must not read as an edited
+    // migration -- and a wrong check is exactly what you discover by running
+    // it somewhere new.
     const sha = (s: string): string =>
       new Bun.CryptoHasher('sha256').update(s).digest('hex');
 

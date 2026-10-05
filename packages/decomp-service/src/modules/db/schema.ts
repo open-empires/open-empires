@@ -1597,8 +1597,14 @@ DELETE FROM toolchains
     // Checked INSIDE the migration's own transaction. 018 proved that
     // "recorded as applied" and "actually did something" are different
     // claims, and only this one is worth anything.
-    verify: `SELECT COUNT(*) AS ok FROM toolchains
-              WHERE cl_sha256 = '91ea199691b0f7d91a228e88c42e54d96132af25d29da22912b40c574f49f01c'`,
-    verifyExpects: 'nonzero',
+    // The invariant is that NO row carries the old identity any more, which is
+    // true both after a successful migration and on a fresh database that
+    // never had one. Asserting instead that the new rows exist was wrong: it
+    // failed every fresh database, where inserting nothing is the correct
+    // outcome. `verify` is deliberately not part of the migration's stored
+    // hash, so fixing it here does not read as an edited migration.
+    verify: `SELECT COUNT(*) AS stragglers FROM toolchains
+              WHERE cl_sha256 = '5e712379f6f2dc979bdc09573a9609a72225288ec6da232b83e5962800cb5ff4'`,
+    verifyExpects: 'zero',
   },
 ];
