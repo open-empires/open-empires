@@ -65,12 +65,22 @@ interface Status {
   };
   symbols: { named: number; classes: number; byConfidence: Counted[] };
   port: Counted[];
+  /**
+   * PLAIN values, not Option wrappers.
+   *
+   * The service encodes these with `Schema.OptionFromNullOr`, which puts the
+   * value or null straight on the wire -- unlike `gate` or `composition`,
+   * which arrive as `{_tag: 'Some', value}`. Typing them as the wrapper made
+   * `some()` return undefined for every one, so the agents table showed a dash
+   * in the "doing" column while the agents were reporting perfectly well. Two
+   * shapes reach this page and only one of them is an Option.
+   */
   agents: {
-    id: string; role: OptionLike<string>; started: number; beats: number;
-    state: 'live' | 'gone' | 'finished'; silentFor: OptionLike<number>;
-    note: OptionLike<string>;
-    doing: OptionLike<string>;
-    doingAt: OptionLike<number>;
+    id: string; role: string | null; started: number; beats: number;
+    state: 'live' | 'gone' | 'finished'; silentFor: number | null;
+    note: string | null;
+    doing: string | null;
+    doingAt: number | null;
   }[];
 }
 
@@ -733,9 +743,9 @@ export default function Page() {
                 <tr key={a.id}>
                   <td>{a.id}</td>
                   <td className="mut">
-                    {some(a.doing) ?? some(a.role) ?? '—'}
-                    {some(a.doingAt) !== undefined ? (
-                      <span className="prov"> said {ago(some(a.doingAt)!)}</span>
+                    {a.doing ?? a.role ?? '—'}
+                    {a.doingAt !== null ? (
+                      <span className="prov"> said {ago(a.doingAt)}</span>
                     ) : null}
                   </td>
                   <td className="r">{a.beats}</td>
