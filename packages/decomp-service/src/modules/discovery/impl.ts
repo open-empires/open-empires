@@ -273,7 +273,22 @@ export class DiscoveryImpl
            rejected_at = excluded.rejected_at`,
         [sha, va, reason, evidence, Date.now() / 1000],
       );
-      yield* db.run('DELETE FROM functions WHERE subject_sha = ? AND va = ?', [sha, va]);
+      // The deletion is CHECKED. `accepted: true` was reported five times
+      // over rows that were still in the inventory afterwards, because the
+      // result of the DELETE was thrown away -- an acknowledgement that says
+      // the work was done without asking whether it was.
+      const removed = yield* db.run(
+        'DELETE FROM functions WHERE subject_sha = ? AND va = ?',
+        [sha, va],
+      );
+      if (removed === 0) {
+        refuse(
+          'the rejection is recorded, but the inventory row was not removed: ' +
+            `no row at 0x${va.toString(16)} under subject ` +
+            `${sha.slice(0, 12)} matched the deletion`,
+        );
+        continue;
+      }
       out.push({ va, accepted: true, refusedBecause: Option.none(), unblocks });
     }
     return out;
@@ -322,7 +337,20 @@ export class DiscoveryImpl
       });
     }
 
-    return { at: Date.now() / 1000, entries: rows.length, workable, undecodable };
+    const at = Date.now() / 1000;
+    // Stored, so the dashboard reads a fact rather than re-deriving one, and
+    // so the trend is answerable.
+    yield* db.run(
+      `INSERT INTO inventory_audits(subject_sha, at, entries, workable,
+         undecodable, undecodable_proven, repaired)
+       VALUES (?,?,?,?,?,?,?)`,
+      [
+        sha, at, rows.length, workable, undecodable.length,
+        undecodable.filter((u) => u.proven).length,
+        undecodable.filter((u) => u.repaired).length,
+      ],
+    );
+    return { at, entries: rows.length, workable, undecodable };
   }
 
   *rejections(): EffectGen<

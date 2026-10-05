@@ -382,9 +382,22 @@ export class LegacyImpl
     // re-import -- including for the 13 candidates the derivation REFUSES to
     // name, which is the one answer that must not be quietly restored.
     yield* this.runEach(
+      // DO NOTHING on conflict, not DO UPDATE SET size.
+      //
+      // functions.json is a one-time SEED, not an authority on extents. The
+      // service measures extents from the bytes and repairs the ones that do
+      // not decode: 0x5a4afa is 594 bytes and 0x5a4e99 is 678, where the JSON
+      // says 158 and 196. Updating the size from the JSON on every import
+      // silently reverted both to the wrong value, which would have made
+      // those two functions unworkable again -- and the JSON cannot be fixed
+      // in place, because then there are two authorities disagreeing about
+      // every size and whichever ran last wins.
+      //
+      // So the import only ever ADDS addresses it knows about. An extent in
+      // the database came from the bytes and stays.
       `INSERT INTO functions(subject_sha, va, size, discovered_by)
        VALUES (?,?,?,NULL)
-       ON CONFLICT(subject_sha, va) DO UPDATE SET size = excluded.size`,
+       ON CONFLICT(subject_sha, va) DO NOTHING`,
       state.inventory.functions.map((f) => [sha, f.va, f.size]),
     );
 

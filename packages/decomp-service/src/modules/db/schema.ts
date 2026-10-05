@@ -887,29 +887,12 @@ CREATE TABLE rejected_entries (
   PRIMARY KEY (subject_sha, va)
 );
 
--- Enforced HERE rather than in each producer.
---
--- There are two writers of \`functions\` today (discovery and the legacy
--- import) and the next one is a matter of time. Asking each to remember a
--- NOT EXISTS clause is how a rule survives in two places and then in one:
--- the producer that forgets silently resurrects every rejection. A BEFORE
--- INSERT trigger makes the rule a property of the table, so a writer cannot
--- fail to honour it, including one written later by someone who has never
--- read this comment.
---
--- RAISE(IGNORE) skips the row and lets the rest of the statement proceed,
--- which is the same semantics as ON CONFLICT DO NOTHING. The skip is not
--- hidden: \`rejected_entries\` is the record of what was skipped and why,
--- and the discovery report counts its own refusals separately.
-CREATE TRIGGER functions_honour_rejections
-BEFORE INSERT ON functions
-WHEN EXISTS (
-  SELECT 1 FROM rejected_entries r
-   WHERE r.subject_sha = NEW.subject_sha AND r.va = NEW.va
-)
-BEGIN
-  SELECT RAISE(IGNORE);
-END;
+-- The trigger that enforces this lives in migration 009, NOT here. It was
+-- written into this migration after this migration had already been recorded
+-- as applied, so the runner skipped it and the trigger silently never
+-- existed -- which is why five rejected addresses were back in the inventory
+-- within the hour. Editing an applied migration does nothing; 009 also adds
+-- the checksum that makes that mistake report itself.
 `,
   },
   {
@@ -1165,6 +1148,71 @@ CREATE VIEW global_import_slot_overlap AS
 SELECT g.subject_sha, g.address
   FROM globals g
   JOIN import_slots s ON s.subject_sha = g.subject_sha AND s.slot = g.address;
+`,
+  },
+  {
+    id: '008-inventory-audits',
+    sql: `
+-- Each run of the workability audit, stored as a fact.
+--
+-- The audit decodes every inventory entry, which takes about two seconds --
+-- far too slow for a dashboard polling every five. The alternative of
+-- recomputing it per request was what produced pre-aggregated scalars
+-- nobody could re-derive. So the audit WRITES its result and every reader
+-- queries it, which also gives the figure a history: whether the number of
+-- unworkable entries is falling is a question no single reading answers.
+CREATE TABLE inventory_audits (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  subject_sha        TEXT    NOT NULL,
+  at                 REAL    NOT NULL,
+  entries            INTEGER NOT NULL,
+  workable           INTEGER NOT NULL,
+  undecodable        INTEGER NOT NULL,
+  undecodable_proven INTEGER NOT NULL,
+  repaired           INTEGER NOT NULL
+);
+CREATE INDEX inventory_audits_at ON inventory_audits(subject_sha, at DESC);
+`,
+  },
+  {
+    id: '009-honour-rejections',
+    sql: `
+-- Rejections, enforced by the TABLE rather than by each producer.
+--
+-- There are two writers of \`functions\` today -- discovery, and the legacy
+-- import that reads decomp/functions.json -- and the JSON still lists every
+-- address rejected so far, so it re-seeds them on each import. Asking each
+-- writer to remember a NOT EXISTS clause is how a rule survives in two
+-- places and then in one. As a trigger it is a property of the table, so a
+-- writer cannot fail to honour it, including the legacy import and whatever
+-- is added next.
+--
+-- RAISE(IGNORE) skips the row and lets the statement proceed, the same
+-- semantics as ON CONFLICT DO NOTHING. The skip is not hidden:
+-- \`rejected_entries\` records what is skipped and why, and the discovery
+-- report counts its own refusals.
+CREATE TRIGGER functions_honour_rejections
+BEFORE INSERT ON functions
+WHEN EXISTS (
+  SELECT 1 FROM rejected_entries r
+   WHERE r.subject_sha = NEW.subject_sha AND r.va = NEW.va
+)
+BEGIN
+  SELECT RAISE(IGNORE);
+END;
+
+-- The text each migration was applied FROM.
+--
+-- A migration already recorded in \`migrations\` is skipped, so editing one
+-- does nothing at all -- and says nothing. That is how the trigger above was
+-- written, believed applied, and absent: the table from the same migration
+-- existed, so everything looked right. Storing the hash lets the runner
+-- compare what it would run against what it did run and say so.
+--
+-- Rows applied before this migration have no hash. They are backfilled from
+-- the current text on this upgrade -- presumed correct as of now -- so that
+-- any edit AFTER this point is caught rather than assumed.
+ALTER TABLE migrations ADD COLUMN sql_sha256 TEXT;
 `,
   },
 ];

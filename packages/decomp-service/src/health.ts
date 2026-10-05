@@ -22,6 +22,7 @@
  * None of them writes. Health must never change the thing it measures.
  */
 import { Database } from 'bun:sqlite';
+import { MIGRATIONS } from './modules/db/schema';
 
 export interface Check {
   readonly name: string;
@@ -86,6 +87,33 @@ export const check = (db: Database): Health => {
   checks.push(
     run('schema', () => {
       const n = db.query('SELECT COUNT(*) n FROM migrations').get() as { n: number };
+      // A migration edited after being applied is SKIPPED, so the edit never
+      // runs and nothing says so. That is how the trigger enforcing rejected
+      // entries came to be written, believed applied, and absent -- while
+      // the table from the same migration existed, so the schema check
+      // passed and five rejected addresses came back. The drift has to be
+      // part of being healthy, not a line in a boot log nobody reads.
+      const cols = db.query('PRAGMA table_info(migrations)').all() as { name: string }[];
+      if (cols.some((c) => c.name === 'sql_sha256')) {
+        const rows = db
+          .query('SELECT id, sql_sha256 FROM migrations WHERE sql_sha256 IS NOT NULL')
+          .all() as { id: string; sql_sha256: string }[];
+        const current = new Map(
+          MIGRATIONS.map((m) => [
+            m.id,
+            new Bun.CryptoHasher('sha256').update(m.sql).digest('hex'),
+          ]),
+        );
+        const drifted = rows
+          .filter((r) => current.has(r.id) && current.get(r.id) !== r.sql_sha256)
+          .map((r) => r.id);
+        if (drifted.length > 0) {
+          throw new Error(
+            `migration text edited after being applied, so the edit never ran: ` +
+              `${drifted.join(', ')} -- put the change in a NEW migration`,
+          );
+        }
+      }
       return `${n.n} migrations applied`;
     }),
   );

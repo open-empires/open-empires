@@ -462,6 +462,19 @@ export class GlobalsImpl
        GROUP BY reason ORDER BY n DESC`,
       [sha],
     );
+    // Counted by joining the import map, not by counting `identity`
+    // deferrals: that bucket also holds every vtable interior slot and every
+    // isolated pointer dword, so it read 15,011 where the derivation had
+    // skipped 240 -- a read-back that disagreed with the thing it was
+    // reading back.
+    const slotsSkipped = yield* rows(
+      db,
+      CountRow,
+      `SELECT COUNT(*) AS n FROM global_deferrals d
+        JOIN import_slots s ON s.subject_sha = d.subject_sha AND s.slot = d.address
+       WHERE d.subject_sha = ? AND d.what = 'identity'`,
+      [sha],
+    );
     const region = regionOf(subject.sections);
     return Option.some(
       assemble({
@@ -473,7 +486,7 @@ export class GlobalsImpl
         deferrals,
         candidates,
         isCode: region.isCode,
-        importSlotsSkipped: deferrals.filter((d) => d.what === 'identity').length,
+        importSlotsSkipped: slotsSkipped[0]?.n ?? 0,
         librarySymbols: librarySymbols[0]?.n ?? 0,
         libraryRefusalReasons: refusals.flatMap((r) => Array.from({ length: r.n }, () => r.reason)),
       }),

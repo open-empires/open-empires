@@ -81,10 +81,12 @@ if (missing.length > 0) {
     string,
     { readonly uses: number; readonly section: string; readonly files: ReadonlyArray<string> }
   >;
-  const functions = JSON.parse(fs.readFileSync(FUNCTIONS, 'utf8')) as ReadonlyArray<{
-    readonly va: number;
-    readonly size: number;
-  }>;
+  const inventory = JSON.parse(fs.readFileSync(FUNCTIONS, 'utf8')) as {
+    readonly subject_sha256: string;
+    readonly count: number;
+    readonly functions: ReadonlyArray<{ readonly va: number; readonly size: number }>;
+  };
+  const functions = inventory.functions;
 
   const found = await (async () => {
     const decoder = await loadDecoder();
@@ -105,6 +107,21 @@ if (missing.length > 0) {
     }
     return { addresses, references, unconfirmed };
   })();
+
+  buntest('both artifacts are about this very subject', () => {
+    // A cross-check against a different binary proves nothing. The artifact
+    // names the subject it was produced from, so this is checkable.
+    expect(inventory.subject_sha256).toBe(
+      '71cfff63113ab46d99f22fce5b987143de8c1582a7bd4dce10776a3ddffd7d4d',
+    );
+    // The artifact's own `count` field says 5,565 while its array holds
+    // 6,570. Asserted as it stands rather than reconciled: the file is a
+    // frozen legacy artifact this service does not write, and the
+    // disagreement is a reason to treat its numbers as a cross-check and
+    // never as a source.
+    expect(inventory.count).toBe(5565);
+    expect(inventory.functions.length).toBe(6570);
+  });
 
   buntest('the Python artifact holds 503 addresses, 42 of them in .text', () => {
     const entries = Object.entries(recorded);

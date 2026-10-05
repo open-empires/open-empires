@@ -1,4 +1,4 @@
-import { Effect } from 'effect';
+import { Effect, Semaphore } from 'effect';
 import { effunct, implementing, type EffectGen } from 'effective-modules';
 import { Database } from 'bun:sqlite';
 import path from 'node:path';
@@ -12,6 +12,31 @@ export const DB_PATH = path.resolve(
 );
 
 const KEY = Symbol.for('open-empires.decomp.db');
+const TX_KEY = Symbol.for('open-empires.decomp.db.transaction');
+
+/**
+ * One transaction at a time on the one connection.
+ *
+ * SQLite has no nested transactions and this process has a single handle, so
+ * two overlapping `tx` calls make the second `BEGIN` fail with "cannot start
+ * a transaction within a transaction". That is not hypothetical: the server
+ * runs five background workers, three of them transactional, and they tick
+ * together. Two of them failed on every tick -- the globals inventory and the
+ * import-name derivation both recorded nothing for as long as they were
+ * scheduled alongside each other.
+ *
+ * Parked on globalThis beside the connection, for the same reason: `bun
+ * --watch` reloading this module must not mint a second lock over the first
+ * lock's connection.
+ */
+const transactionLock = (): Semaphore.Semaphore => {
+  const g = globalThis as Record<symbol, unknown>;
+  const existing = g[TX_KEY];
+  if (existing !== undefined) return existing as Semaphore.Semaphore;
+  const lock = Semaphore.makeUnsafe(1);
+  g[TX_KEY] = lock;
+  return lock;
+};
 
 /** One connection for the process. Parked on globalThis so `bun --watch`
  *  reloading a module does not leak a handle per edit. */
@@ -69,6 +94,12 @@ export class DbImpl extends implementing(modules.Db) implements IDb {
   }
 
   *tx<A, E>(body: () => EffectGen<A, E>): EffectGen<A, E | DbError> {
+    // Serialized on the single connection. A caller that would otherwise see
+    // "cannot start a transaction within a transaction" waits instead.
+    return yield* transactionLock().withPermits(1)(effunct(() => this.transact(body))());
+  }
+
+  private *transact<A, E>(body: () => EffectGen<A, E>): EffectGen<A, E | DbError> {
     const db = handle();
     yield* Effect.try({ try: () => db.exec('BEGIN IMMEDIATE'), catch: fail('BEGIN') });
     // A verdict batch that half-lands would leave functions claiming a proof
@@ -98,21 +129,63 @@ export class DbImpl extends implementing(modules.Db) implements IDb {
         ),
       catch: fail('create migrations'),
     });
-    const done = new Set(
-      (db.query('SELECT id FROM migrations').all() as { id: string }[]).map((r) => r.id),
+    // `sql_sha256` arrives in migration 009; before it is applied the column
+    // is absent, so the hash of each applied migration is read only when the
+    // column exists.
+    const hashed = (
+      db.query('PRAGMA table_info(migrations)').all() as { name: string }[]
+    ).some((c) => c.name === 'sql_sha256');
+    const done = new Map(
+      (
+        db
+          .query(
+            hashed
+              ? 'SELECT id, sql_sha256 FROM migrations'
+              : 'SELECT id, NULL AS sql_sha256 FROM migrations',
+          )
+          .all() as { id: string; sql_sha256: string | null }[]
+      ).map((r) => [r.id, r.sql_sha256]),
     );
+
+    const sha = (s: string): string =>
+      new Bun.CryptoHasher('sha256').update(s).digest('hex');
+
     const applied: string[] = [];
+    const drifted: string[] = [];
     for (const m of MIGRATIONS) {
-      if (done.has(m.id)) continue;
+      const priorHash = done.get(m.id);
+      if (done.has(m.id)) {
+        // An applied migration is SKIPPED, so editing one does nothing and
+        // reports nothing. That is not hypothetical: a trigger was added to
+        // migration 007 after 007 had been applied, so it never ran, while
+        // the table from the same migration existed and made everything look
+        // correct. Five rejected addresses were back in the inventory within
+        // the hour. Comparing the text against what was actually run turns
+        // that into a loud message instead of a silent no-op.
+        if (priorHash != null && priorHash !== sha(m.sql)) drifted.push(m.id);
+        continue;
+      }
       yield* Effect.try({
         try: () => {
           db.exec('BEGIN');
           try {
             db.exec(m.sql);
-            db.query('INSERT INTO migrations(id, applied_at) VALUES (?,?)').run(
-              m.id,
-              Date.now() / 1000,
-            );
+            // 009 adds the column in its own body, so by the time its row is
+            // written the column exists -- hence the hash is read back from
+            // the schema rather than from the flag computed above.
+            const nowHashed = (
+              db.query('PRAGMA table_info(migrations)').all() as { name: string }[]
+            ).some((c) => c.name === 'sql_sha256');
+            if (nowHashed) {
+              db.query(
+                'INSERT INTO migrations(id, applied_at, sql_sha256) VALUES (?,?,?)',
+              ).run(m.id, Date.now() / 1000, sha(m.sql));
+            } else {
+              db.query('INSERT INTO migrations(id, applied_at) VALUES (?,?)').run(
+                m.id,
+                Date.now() / 1000,
+              );
+            }
             db.exec('COMMIT');
           } catch (e) {
             db.exec('ROLLBACK');
@@ -123,6 +196,58 @@ export class DbImpl extends implementing(modules.Db) implements IDb {
       });
       applied.push(m.id);
     }
+
+    // Backfill, once: rows applied before hashing existed are presumed
+    // correct as of now, so that any edit AFTER this point is caught instead
+    // of silently assumed to have run.
+    yield* Effect.try({
+      try: () => {
+        if (
+          !(
+            db.query('PRAGMA table_info(migrations)').all() as { name: string }[]
+          ).some((c) => c.name === 'sql_sha256')
+        ) {
+          return;
+        }
+        const stmt = db.query(
+          'UPDATE migrations SET sql_sha256 = ? WHERE id = ? AND sql_sha256 IS NULL',
+        );
+        for (const m of MIGRATIONS) stmt.run(sha(m.sql), m.id);
+      },
+      catch: fail('backfill migration hashes'),
+    });
+
+    if (drifted.length > 0) {
+      console.error(
+        `MIGRATION TEXT EDITED AFTER BEING APPLIED, so the edit never ran: ` +
+          `${drifted.join(', ')}. Put the change in a NEW migration.`,
+      );
+    }
     return applied;
+  }
+
+  /** Migrations whose text no longer matches what was run. Surfaced so health
+   *  can refuse, rather than living only in a log line at boot. */
+  *driftedMigrations(): EffectGen<ReadonlyArray<string>, DbError> {
+    const db = handle();
+    return yield* Effect.try({
+      try: () => {
+        const cols = db.query('PRAGMA table_info(migrations)').all() as { name: string }[];
+        if (!cols.some((c) => c.name === 'sql_sha256')) return [];
+        const rows = db
+          .query('SELECT id, sql_sha256 FROM migrations WHERE sql_sha256 IS NOT NULL')
+          .all() as { id: string; sql_sha256: string }[];
+        const current = new Map(
+          MIGRATIONS.map((m) => [
+            m.id,
+            new Bun.CryptoHasher('sha256').update(m.sql).digest('hex'),
+          ]),
+        );
+        return rows
+          .filter((r) => current.has(r.id) && current.get(r.id) !== r.sql_sha256)
+          .map((r) => r.id);
+      },
+      catch: fail('check migration drift'),
+    });
   }
 }

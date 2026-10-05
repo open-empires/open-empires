@@ -94,6 +94,12 @@ const extract = (text: string): string[] => {
     // An interpolated TABLE name cannot become a placeholder -- the shape
     // depends on the interpolation, so there is nothing to check.
     if (/\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+\?/i.test(filled)) continue;
+    // PROSE that happens to open with a statement keyword is not SQL. An
+    // error message beginning "DELETE matched 0 rows for ..." was reported as
+    // a broken statement. Real SQL names what it acts on, so it carries at
+    // least one clause keyword; a string with none of them touches no table
+    // and has nothing about the schema to check.
+    if (!/\b(?:FROM|INTO|SET|VALUES|WHERE|JOIN|TABLE)\b/i.test(filled)) continue;
     out.push(filled);
   }
   }

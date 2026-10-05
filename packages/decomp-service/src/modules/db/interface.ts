@@ -14,5 +14,15 @@ export interface IDb {
   insert(sql: string, params?: ReadonlyArray<unknown>): EffectGen<number, DbError>;
   /** All-or-nothing. A verdict batch that half-lands is worse than none. */
   tx<A, E>(body: () => EffectGen<A, E>): EffectGen<A, E | DbError>;
+  /**
+   * Migrations whose text no longer matches the text they were applied from.
+   *
+   * An applied migration is skipped, so editing one changes nothing and says
+   * nothing. A trigger added to migration 007 after 007 had been applied
+   * never ran, and because the table from the same migration did exist,
+   * everything looked correct while five rejected addresses came back.
+   */
+  driftedMigrations(): EffectGen<ReadonlyArray<string>, DbError>;
+
   migrate(): EffectGen<ReadonlyArray<string>, DbError>;
 }

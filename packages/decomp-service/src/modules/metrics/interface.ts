@@ -70,6 +70,26 @@ export interface SeriesPoint {
   readonly bytes: number;
 }
 
+export interface InventoryHealth {
+  /** None until the first audit has run. */
+  readonly audit: Option.Option<{
+    readonly at: number;
+    readonly entries: number;
+    readonly workable: number;
+    readonly undecodable: number;
+    readonly undecodableProven: number;
+    readonly repaired: number;
+  }>;
+  readonly rejected: number;
+  /** How each entry entered the inventory, and how much of each kind is
+   *  proven -- the question "is discovery producing workable functions". */
+  readonly byEvidence: ReadonlyArray<{
+    readonly evidence: string;
+    readonly functions: number;
+    readonly proven: number;
+  }>;
+}
+
 export interface IMetrics {
   phase2(): EffectGen<Phase2, DbError>;
   lastGateRun(): EffectGen<Option.Option<GateRun>, DbError>;
@@ -85,4 +105,24 @@ export interface IMetrics {
   progress(sinceSeconds: number, buckets: number):
     EffectGen<ReadonlyArray<SeriesPoint>, DbError>;
   queue(): EffectGen<{ depth: number; claimed: number }, DbError>;
+
+  /**
+   * Whether the inventory describes the bytes.
+   *
+   * Three figures that were invisible until an entry recorded 436 bytes short
+   * of its true extent turned out to reach agents as an EMPTY disassembly,
+   * with nothing anywhere reporting it:
+   *
+   *   workable     entries whose recorded extent decodes, so an agent can
+   *                actually read the function. Anything else is an address
+   *                that cannot leave the queue however long it sits there.
+   *   undecodable  the rest, which is the count that must stay at zero
+   *   rejected     addresses recorded as NOT function entries, with the
+   *                decode that justifies each one
+   *
+   * Read from the newest stored audit rather than recomputed: the audit
+   * decodes every entry and takes seconds, and a dashboard polls far faster
+   * than that.
+   */
+  inventoryHealth(): EffectGen<InventoryHealth, DbError>;
 }

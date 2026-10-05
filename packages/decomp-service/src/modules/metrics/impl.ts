@@ -4,7 +4,7 @@ import { modules } from '../index';
 import type { DbError } from '../db/interface';
 import type {
   Composition, Counted, GateRun, IMetrics, ImportSurface,
-  Phase2, SeriesPoint, SymbolMap,
+  InventoryHealth, Phase2, SeriesPoint, SymbolMap,
 } from './interface';
 
 const num = (v: unknown): number => (typeof v === 'number' ? v : Number(v ?? 0));
@@ -203,5 +203,58 @@ export class MetricsImpl
       [Date.now() / 1000, Date.now() / 1000],
     )) as Record<string, unknown>;
     return { depth: num(r?.depth), claimed: num(r?.claimed) };
+  }
+
+  *inventoryHealth(): EffectGen<InventoryHealth, DbError> {
+    const db = this.dependencies.Db;
+    // Newest audit for the subject in force. Joining current_config rather
+        // than taking the newest row outright: an audit of a different subject
+    // is not an answer about this one.
+    const a = (yield* db.one(
+      `SELECT ia.at AS at, ia.entries AS entries, ia.workable AS workable,
+              ia.undecodable AS undecodable,
+              ia.undecodable_proven AS undecodable_proven,
+              ia.repaired AS repaired
+         FROM inventory_audits ia
+         JOIN current_config c ON c.subject_sha = ia.subject_sha
+        WHERE c.only_row = 1
+        ORDER BY ia.at DESC LIMIT 1`,
+    )) as Record<string, unknown> | null;
+
+    const rejected = (yield* db.one(
+      `SELECT COUNT(*) AS n FROM rejected_entries r
+         JOIN current_config c ON c.subject_sha = r.subject_sha
+        WHERE c.only_row = 1`,
+    )) as Record<string, unknown> | null;
+
+    const byEvidence = (yield* db.all(
+      `SELECT COALESCE(f.discovered_by, 'pre-existing') AS evidence,
+              COUNT(*) AS functions,
+              SUM(CASE WHEN EXISTS (SELECT 1 FROM proven p WHERE p.va = f.va)
+                       THEN 1 ELSE 0 END) AS proven
+         FROM functions f
+        GROUP BY evidence
+        ORDER BY functions DESC`,
+    )) as ReadonlyArray<Record<string, unknown>>;
+
+    return {
+      audit:
+        a === null
+          ? Option.none()
+          : Option.some({
+              at: num(a.at),
+              entries: num(a.entries),
+              workable: num(a.workable),
+              undecodable: num(a.undecodable),
+              undecodableProven: num(a.undecodable_proven),
+              repaired: num(a.repaired),
+            }),
+      rejected: num(rejected?.n),
+      byEvidence: byEvidence.map((r) => ({
+        evidence: String(r.evidence),
+        functions: num(r.functions),
+        proven: num(r.proven),
+      })),
+    };
   }
 }

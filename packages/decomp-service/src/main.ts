@@ -294,6 +294,7 @@ const routes = async (req: Request): Promise<Response> => {
             port: yield* m.portSurface(),
             progress: yield* m.progress(24 * 3600, 80),
             queue: yield* m.queue(),
+            inventory: yield* m.inventoryHealth(),
             agents: encodeAgents(yield* reg.list()),
           };
         }),
@@ -450,22 +451,16 @@ const routes = async (req: Request): Promise<Response> => {
             return { ok: false, error: `unknown discovery action ${seg[2]}` };
           }
 
-          // Derived by query, never a stored scalar: the inventory IS the
-          // answer to "how was each function found".
+          // Delegated, not re-queried. This route had its own copy of the
+          // evidence breakdown next to the one the dashboard reads through
+          // Metrics, which is two answers to one question waiting to
+          // disagree the first time either is edited.
+          const health = yield* (yield* modules.Metrics).inventoryHealth();
           return {
-            byEvidence: yield* db.all(
-              `SELECT COALESCE(discovered_by, 'pre-existing') AS evidence,
-                      COUNT(*) AS functions,
-                      SUM(CASE WHEN EXISTS
-                        (SELECT 1 FROM proven p WHERE p.va = f.va)
-                        THEN 1 ELSE 0 END) AS proven
-                 FROM functions f
-                GROUP BY evidence ORDER BY functions DESC`,
-            ),
-            total: yield* db.one('SELECT COUNT(*) AS functions FROM functions'),
-            rejected: yield* db.one(
-              'SELECT COUNT(*) AS addresses FROM rejected_entries',
-            ),
+            byEvidence: health.byEvidence,
+            total: { functions: health.byEvidence.reduce((n, e) => n + e.functions, 0) },
+            rejected: { addresses: health.rejected },
+            workability: Option.getOrNull(health.audit),
           };
         }),
       ) as Effect.Effect<unknown, { readonly _tag: string }, never>,
@@ -584,6 +579,31 @@ const routes = async (req: Request): Promise<Response> => {
 // ----------------------------------------------------------------- workers
 
 /**
+ * What a worker failure actually was.
+ *
+ * `Effect.runPromise` rejects with the typed failure itself, and a
+ * `Schema.TaggedError` has an empty `message`: reading only that printed a
+ * worker's label and nothing else, which reads as a successful quiet tick.
+ */
+const describeFailure = (cause: unknown): string => {
+  if (cause !== null && typeof cause === 'object') {
+    const tagged = cause as { _tag?: unknown; message?: unknown };
+    if (typeof tagged._tag === 'string') {
+      const fields = Object.entries(cause as Record<string, unknown>)
+        .filter(([key]) => key !== '_tag')
+        .map(([key, value]) => `${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`)
+        .join(' ');
+      return fields === '' ? tagged._tag : `${tagged._tag}: ${fields}`;
+    }
+    if (cause instanceof Error) {
+      return cause.message === '' ? (cause.stack ?? String(cause)) : cause.message;
+    }
+    return JSON.stringify(cause);
+  }
+  return String(cause);
+};
+
+/**
  * Server-owned background work. Each loop is self-limiting: it does what
  * there is to do and sleeps. None of them is startable by hand, because a
  * second copy would contend for the same rows.
@@ -595,7 +615,13 @@ const supervise = () => {
         await body();
       } catch (e) {
         // A worker must never die of one bad iteration; the next tick retries.
-        console.error(`[${label}] ${e instanceof Error ? e.message : String(e)}`);
+        //
+        // A tagged failure carries its detail in its FIELDS, not in
+        // `message` -- Schema.TaggedError leaves that empty -- so printing
+        // only the message logged `[globals] ` with nothing after it and the
+        // worker looked like it had run. The tag and the fields are what say
+        // what went wrong.
+        console.error(`[${label}] ${describeFailure(e)}`);
       }
     };
     void tick();
@@ -619,6 +645,36 @@ const supervise = () => {
     );
     const added = reports.reduce((a, r) => a + r.added, 0);
     if (added > 0) console.log(`[discovery] ${added} new function(s) entered the inventory`);
+  });
+
+  // Does the inventory describe the bytes? An entry whose recorded extent
+  // does not decode reaches an agent with no readable body, and before this
+  // existed nothing asked: two such entries sat in the queue recorded 436
+  // and 482 bytes short of their true extents, and only turned up because
+  // their sizes were being checked for an unrelated reason.
+  //
+  // `repair: true` is deliberate. It only writes where the recorded extent
+  // ALREADY fails to decode -- so the stored size is unusable either way --
+  // and never touches a proven function, whose span a proof was taken
+  // against. Replacing an unusable size with a measured one cannot lose
+  // information, and leaving it for someone to run by hand is how the last
+  // standing task became a script nobody ran.
+  every('inventory audit', 900, async () => {
+    const a = await Effect.runPromise(
+      provided(
+        Effect.gen(function* () {
+          const d = yield* modules.Discovery;
+          return yield* d.auditWorkability(true);
+        }),
+      ),
+    );
+    const repaired = a.undecodable.filter((u) => u.repaired).length;
+    if (a.undecodable.length > 0 || repaired > 0) {
+      console.log(
+        `[inventory] ${a.workable}/${a.entries} entries decode; ` +
+          `${a.undecodable.length} do not (${repaired} repaired this pass)`,
+      );
+    }
   });
 
   // The portable tree is a CONSEQUENCE of the proven set, like discovery.
