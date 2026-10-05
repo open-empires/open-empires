@@ -49,6 +49,20 @@ export interface IRegistry {
   list(): EffectGen<ReadonlyArray<Agent>, DbError>;
 }
 
-/** An agent silent this long is presumed gone. It beats on every submit, and
- *  a submit cycle is minutes, so a ten-minute gap means stopped. */
-export const STALE_AFTER_SECONDS = 600;
+/**
+ * An agent silent this long is presumed gone.
+ *
+ * Ten minutes was set when a submit cycle was minutes, and it is now wrong in
+ * the direction that matters: it reports working agents as dead. The queue
+ * serves functions of six to eight thousand bytes, and a single sweep of
+ * fourteen flag sets over one of those runs for many minutes with no call in
+ * between. Three workers were shown as gone -- at 748s, 848s and 950s of
+ * silence -- while all three were mid-sweep and went on to report.
+ *
+ * Forty minutes is above the longest single operation an agent performs and
+ * still well inside the lease, so a genuinely dead agent's work still returns
+ * to the queue by lease expiry rather than by this. Calling a working agent
+ * dead is the worse error: it is the figure a person uses to decide whether
+ * to intervene.
+ */
+export const STALE_AFTER_SECONDS = 2400;

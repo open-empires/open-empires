@@ -69,12 +69,26 @@ const scanOnce = (
   return found;
 };
 
+/**
+ * A minute, declared rather than discovered.
+ *
+ * A scan with no hint reads a dword from every page-aligned frame, which
+ * touches all 512MB of the mapping. That is inherently slow, and slower again
+ * when five agents are driving the compiler on the same machine -- it has
+ * taken 25 seconds under load against 5 idle. The default timeout then fails
+ * a test whose answer was never wrong, which trains the reader to ignore it.
+ *
+ * The service never pays this: it passes the recorded root as a hint and
+ * costs one attempt.
+ */
+const SCAN_TIMEOUT_MS = 60_000;
+
 test('the scan rediscovers the known CR3 without being told it', () => {
   const found = scanOnce(GUEST_RAM_PATH, expectBytes);
   expect(found._tag).toBe('Located');
   if (found._tag !== 'Located') return;
   expect(found.cr3).toBe(GUEST_CR3);
-});
+}, SCAN_TIMEOUT_MS);
 
 test('a 16-byte probe is ambiguous, and says so rather than choosing', () => {
   // The reason the probe is a page. Eight processes map the image, and all
@@ -82,7 +96,7 @@ test('a 16-byte probe is ambiguous, and says so rather than choosing', () => {
   // state from the wrong process while the code looked perfectly right.
   const found = scanOnce(GUEST_RAM_PATH, image.bytes.slice(0, 16));
   expect(found._tag).toBe('Ambiguous');
-});
+}, SCAN_TIMEOUT_MS);
 
 test('a wrong hint does not win over the real answer', () => {
   // The hint exists only to save a scan. If it is accepted without being
@@ -93,7 +107,7 @@ test('a wrong hint does not win over the real answer', () => {
   expect(found._tag).toBe('Located');
   if (found._tag !== 'Located') return;
   expect(found.cr3).toBe(GUEST_CR3);
-});
+}, SCAN_TIMEOUT_MS);
 
 const SECOND = path.join(path.dirname(GUEST_RAM_PATH), 'guest-ram-2.bin');
 
@@ -117,4 +131,5 @@ test.skipIf(!fs.existsSync(SECOND))(
     expect(Option.isSome(got)).toBe(true);
     expect([...Option.getOrThrow(got)]).toEqual([...expectBytes]);
   },
+  SCAN_TIMEOUT_MS,
 );
