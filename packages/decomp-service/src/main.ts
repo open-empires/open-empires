@@ -144,7 +144,10 @@ const routes = async (req: Request): Promise<Response> => {
               yield* reg.register(id, str(body.role));
               return { ok: true, id };
             case 'beat':
-              yield* reg.beat(id);
+              // One sentence, in the agent's own words, riding on a call it
+              // already makes. Optional: a beat with no summary keeps the
+              // previous one and its age rather than blanking it.
+              yield* reg.beat(id, str(body.doing));
               return { ok: true, id };
             case 'done':
               yield* reg.deregister(id, str(body.note));

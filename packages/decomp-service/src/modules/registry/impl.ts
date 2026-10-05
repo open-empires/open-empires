@@ -30,11 +30,19 @@ export class RegistryImpl
     );
   }
 
-  *beat(id: string): EffectGen<void, DbError | UnknownAgent> {
+  *beat(id: string, doing: Option.Option<string>): EffectGen<void, DbError | UnknownAgent> {
+    const at = now();
+    // COALESCE, so a beat that carries no summary leaves the last one and its
+    // timestamp alone rather than blanking the column. The reader then sees a
+    // description with an age, which is the honest state: an agent beating
+    // every minute while its summary ages is a real thing to notice.
     const n = yield* this.dependencies.Db.run(
-      `UPDATE agents SET last_beat = ?, beats = beats + 1
-       WHERE id = ? AND finished IS NULL`,
-      [now(), id],
+      `UPDATE agents
+          SET last_beat = ?, beats = beats + 1,
+              doing = COALESCE(?, doing),
+              doing_at = CASE WHEN ? IS NULL THEN doing_at ELSE ? END
+        WHERE id = ? AND finished IS NULL`,
+      [at, Option.getOrNull(doing), Option.getOrNull(doing), at, id],
     );
     // A beat must not invent an agent: a typo would become a phantom worker.
     if (n === 0) return yield* Effect.fail(new UnknownAgent({ id }));
@@ -55,7 +63,7 @@ export class RegistryImpl
   *list(): EffectGen<ReadonlyArray<Agent>, DbError> {
     const t = now();
     const rows = yield* this.dependencies.Db.all(
-      `SELECT id, role, started, last_beat, beats, finished, note FROM agents
+      `SELECT id, role, started, last_beat, beats, finished, note, doing, doing_at FROM agents
        ORDER BY (finished IS NOT NULL), started DESC LIMIT 100`,
     );
     return rows.map((raw) => {
@@ -66,6 +74,8 @@ export class RegistryImpl
       return {
         id: String(o.id),
         role: optStr(o.role),
+        doing: optStr(o.doing),
+        doingAt: o.doing_at == null ? Option.none() : Option.some(Number(o.doing_at)),
         started: Number(o.started),
         lastBeat,
         beats: Number(o.beats),

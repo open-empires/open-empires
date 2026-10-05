@@ -23,6 +23,11 @@ export const AgentWire = Schema.Struct({
   beats: Schema.Number,
   finished: Schema.OptionFromNullOr(Schema.Number),
   note: Schema.OptionFromNullOr(Schema.String),
+  /** What the agent last said it was doing, and when it said it. The "when"
+   *  is separate from the beat on purpose: an agent can keep beating while
+   *  its description ages. */
+  doing: Schema.OptionFromNullOr(Schema.String),
+  doingAt: Schema.OptionFromNullOr(Schema.Number),
   state: Schema.Literals(['live', 'gone', 'finished']),
   silentFor: Schema.OptionFromNullOr(Schema.Number),
 });

@@ -22,13 +22,28 @@ export interface Agent {
   readonly beats: number;
   readonly finished: Option.Option<number>;
   readonly note: Option.Option<string>;
+  /** What the agent last said it was doing, in one sentence. */
+  readonly doing: Option.Option<string>;
+  /** When it said that. Separate from the beat: an agent that keeps beating
+   *  while repeating a summary from forty minutes ago is the case a reader
+   *  has to be able to see. */
+  readonly doingAt: Option.Option<number>;
   readonly state: AgentState;
   readonly silentFor: Option.Option<number>;
 }
 
 export interface IRegistry {
   register(id: string, role: Option.Option<string>): EffectGen<void, DbError>;
-  beat(id: string): EffectGen<void, DbError | UnknownAgent>;
+  /**
+   * Record that the agent is alive, and optionally what it is doing.
+   *
+   * `doing` is one sentence in the agent's own words. It rides on the beat
+   * because the beat is a call the agent already makes on every submit and on
+   * a timer, so keeping it current costs one field rather than another round
+   * trip -- and it cannot silently outlive the agent, because a stale beat is
+   * already visible.
+   */
+  beat(id: string, doing: Option.Option<string>): EffectGen<void, DbError | UnknownAgent>;
   deregister(id: string, note: Option.Option<string>):
     EffectGen<void, DbError | UnknownAgent>;
   list(): EffectGen<ReadonlyArray<Agent>, DbError>;

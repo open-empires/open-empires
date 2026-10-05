@@ -56,6 +56,8 @@ interface Status {
     id: string; role: OptionLike<string>; started: number; beats: number;
     state: 'live' | 'gone' | 'finished'; silentFor: OptionLike<number>;
     note: OptionLike<string>;
+    doing: OptionLike<string>;
+    doingAt: OptionLike<number>;
   }[];
 }
 
@@ -636,7 +638,12 @@ export default function Page() {
               {s.agents.slice(0, 20).map((a) => (
                 <tr key={a.id}>
                   <td>{a.id}</td>
-                  <td className="mut">{some(a.role) ?? '—'}</td>
+                  <td className="mut">
+                    {some(a.doing) ?? some(a.role) ?? '—'}
+                    {some(a.doingAt) !== undefined ? (
+                      <span className="prov"> said {ago(some(a.doingAt)!)}</span>
+                    ) : null}
+                  </td>
                   <td className="r">{a.beats}</td>
                   <td className="mut">{ago(a.started)}</td>
                   <td className={`state-${a.state}`}>{a.state}</td>
@@ -656,7 +663,12 @@ export default function Page() {
             are counted from those rows, so a new question is a new query rather than new
             plumbing. The graph works the same way: each function records when it first
             passed the proof, so progress over time is read from those timestamps instead
-            of being sampled. <strong>One thing this service deliberately does not do is
+            of being sampled, and it spans the whole record rather than a sliding
+            window. It begins partway up because the work done before this service
+            existed was imported all at once and carries a single timestamp — the
+            record genuinely does not know when each of those was finished, and
+            spreading them out would be an invention. <strong>One thing this service
+            deliberately does not do is
             decide whether a function is correct</strong> — that is settled only by
             compiling it and comparing bytes, and this page reports that verdict rather
             than forming its own.

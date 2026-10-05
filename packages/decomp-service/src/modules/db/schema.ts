@@ -1462,4 +1462,28 @@ CREATE INDEX gap_scans_at ON gap_scans(subject_sha, at DESC);
 ALTER TABLE import_dumps ADD COLUMN mtime REAL NOT NULL DEFAULT 0;
 `,
   },
+  {
+    id: '017-agent-doing',
+    sql: `
+-- What an agent is doing RIGHT NOW, in its own words.
+--
+-- The dashboard had a "doing" column and it showed \`role\`, which is set once
+-- at registration and never changes -- "round 38 batch A" for an agent that
+-- has since claimed two functions, read 8,000 lines of notes, and spent an
+-- hour on a branch displacement. For agents registered without a role it was
+-- simply blank. Neither told a reader what was happening.
+--
+-- An agent beats on every submit and on a timer anyway, so the beat is where
+-- this belongs: it costs the agent one extra field on a call it already
+-- makes, and it cannot go stale without the beat also going stale.
+--
+-- \`doing_at\` is kept separately from \`last_beat\` because they answer
+-- different questions. A beat says the agent is alive; this says when it last
+-- described itself. An agent that beats every minute while repeating a
+-- summary from forty minutes ago is exactly the case a reader must be able
+-- to see.
+ALTER TABLE agents ADD COLUMN doing TEXT;
+ALTER TABLE agents ADD COLUMN doing_at REAL;
+`,
+  },
 ];

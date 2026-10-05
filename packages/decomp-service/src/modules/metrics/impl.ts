@@ -166,7 +166,23 @@ export class MetricsImpl
     buckets: number,
   ): EffectGen<ReadonlyArray<SeriesPoint>, DbError> {
     const now = Date.now() / 1000;
-    const from = now - sinceSeconds;
+    // FROM THE FIRST PROOF, not from a fixed window.
+    //
+    // A 24-hour window answered "what happened today", which is not the
+    // question the chart is on the page to answer. Progress on this is
+    // measured in weeks, and a window that slides forward hides the shape of
+    // it: the early climb drops off the left edge and the curve always looks
+    // like whatever the last day did. The series now starts at the earliest
+    // recorded proof, so the chart shows the whole record and `sinceSeconds`
+    // is only a floor for the case where nothing is proven yet.
+    const earliest = (yield* this.dependencies.Db.one(
+      'SELECT MIN(decided_at) AS at FROM proven',
+    )) as { at: number | null } | null;
+    // Exactly the first proof, not the earlier of that and a window. Taking
+    // the earlier padded the left of the chart with hours in which nothing
+    // had been collected yet, which reads as a flat start that never
+    // happened. `sinceSeconds` is only the fallback for an empty record.
+    const from = earliest?.at == null ? now - sinceSeconds : earliest.at;
     // Each bucket is a real boundary in the data, not a moment a collector
     // happened to wake up: `proven` carries the decision time of every
     // verdict, so the cumulative count at time t is just a query.
