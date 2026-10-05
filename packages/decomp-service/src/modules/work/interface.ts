@@ -171,6 +171,23 @@ export interface IWork {
   sweep(agentId: string, va: number, source: string, flagSets: ReadonlyArray<string>):
     EffectGen<SweepReport, SubmitFailure>;
 
+  /**
+   * Replace the stored source of an ALREADY-PROVEN function.
+   *
+   * An exact submit makes an address unclaimable, so the text that happened
+   * to be in hand at that moment became the permanent record. Agents kept
+   * losing documentation to it -- proven functions stored as bare two-line
+   * probes, and one stored with a comment claiming evidence a later control
+   * disproved. There was no way to correct either.
+   *
+   * The proof is not weakened: the new source is compiled and must be exact
+   * AT THE ENTRY, exactly as the original was. If it is not, nothing changes
+   * and the caller is told. So this can improve the record and can never
+   * launder a worse one into it.
+   */
+  amend(agentId: string, va: number, source: string, flags: string):
+    EffectGen<Verdict, SubmitFailure>;
+
   /** Record a diagnosed near-miss and give the lease back. */
   park(agentId: string, va: number, blockedClass: string, eliminated: string):
     EffectGen<void, DbError | NotClaimed>;

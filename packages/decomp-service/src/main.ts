@@ -182,6 +182,13 @@ const routes = async (req: Request): Promise<Response> => {
                   String(body.flags ?? SUBJECT_FLAGS),
                 ),
               );
+            case 'amend':
+              return encodeVerdict(
+                yield* work.amend(
+                  agentId, num(body.va), String(body.source ?? ''),
+                  String(body.flags ?? SUBJECT_FLAGS),
+                ),
+              );
             case 'park':
               yield* work.park(
                 agentId, num(body.va), String(body.blockedClass ?? ''),

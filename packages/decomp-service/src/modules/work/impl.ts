@@ -383,6 +383,57 @@ export class WorkImpl
     return { size: fn.size, original: original.value };
   }
 
+  *amend(
+    agentId: string,
+    va: number,
+    source: string,
+    flags: string,
+  ): EffectGen<Verdict, SubmitFailure> {
+    const db = this.dependencies.Db;
+    const gate = this.dependencies.Gate;
+    const t = now();
+
+    const fn = (yield* db.one(`SELECT size FROM functions WHERE va = ?`, [va])) as
+      | { size: number }
+      | null;
+    if (fn === null) return yield* Effect.fail(new UnknownFunction({ va }));
+
+    const original = yield* this.dependencies.Subject.bytesAt({ va, length: fn.size });
+    if (Option.isNone(original)) return yield* Effect.fail(new UnknownFunction({ va }));
+
+    const bucket = flags === SUBJECT_FLAGS_O1 ? SUBJECT_FLAGS_O1 : SUBJECT_FLAGS;
+    const v = yield* gate.check({ va, original: original.value, source, flags: bucket });
+    const atEntry = v.exact && Option.getOrElse(v.matchedAt, () => 0) === 0;
+
+    // The replacement must stand on its own. A source that does not reproduce
+    // the subject at the entry never becomes the record, whatever the old one
+    // looked like.
+    if (atEntry) {
+      const proven = (yield* db.one(
+        `SELECT attempt_id FROM proven WHERE va = ? LIMIT 1`,
+        [va],
+      )) as { attempt_id: number } | null;
+      if (proven !== null) {
+        yield* db.run(
+          `UPDATE attempts SET source = ?, source_sha = ?, author = ?, created_at = ?
+           WHERE id = ?`,
+          [source, sha(source), agentId, t, proven.attempt_id],
+        );
+      }
+    }
+
+    return {
+      exact: atEntry,
+      compiled: v.compiled,
+      emittedSize: v.emittedSize,
+      masked: Option.some(v.masked),
+      compared: Option.some(v.compared),
+      firstDiff: v.firstDiff,
+      detail: v.detail,
+      weak: v.weaklyVerified,
+    };
+  }
+
   *park(
     agentId: string,
     va: number,
