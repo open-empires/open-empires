@@ -27,6 +27,7 @@ import { ComposeImpl } from './modules/compose/impl';
 import { DbImpl, handle as dbHandle } from './modules/db/impl';
 import { DisasmImpl } from './modules/disasm/impl';
 import { GateImpl } from './modules/gate/impl';
+import { ImportNamesImpl } from './modules/import-names/impl';
 import { LegacyImpl } from './modules/legacy/impl';
 import { NamesImpl } from './modules/names/impl';
 import { PortableImpl } from './modules/portable/impl';
@@ -53,6 +54,7 @@ export const layerLive = pipe(
   Layer.provideMerge(RelocImpl.Layer),
   Layer.provideMerge(LegacyImpl.Layer),
   Layer.provideMerge(NamesImpl.Layer),
+  Layer.provideMerge(ImportNamesImpl.Layer),
   Layer.provideMerge(GateImpl.Layer),
   Layer.provideMerge(DisasmImpl.Layer),
   Layer.provideMerge(SubjectImpl.Layer),

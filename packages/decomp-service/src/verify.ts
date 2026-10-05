@@ -5,6 +5,7 @@
  *     bun src/verify.ts compose         assemble the span and diff it
  *     bun src/verify.ts reloc           classify every relocation field
  *     bun src/verify.ts port [dir]      generate the portable tree
+ *     bun src/verify.ts imports         name import slots from the libraries
  *
  * These are not HTTP routes. Each one recompiles every reconstruction in force
  * -- thousands of calls into one serialised compiler -- so a request that
@@ -23,12 +24,14 @@ import { ComposeImpl } from './modules/compose/impl';
 import { DbImpl } from './modules/db/impl';
 import { DisasmImpl } from './modules/disasm/impl';
 import { GateImpl } from './modules/gate/impl';
+import { ImportNamesImpl } from './modules/import-names/impl';
 import { PortableImpl } from './modules/portable/impl';
 import { RelocImpl } from './modules/reloc/impl';
 import { SubjectImpl } from './modules/subject/impl';
 
 const layer = pipe(
   ComposeImpl.Layer,
+  Layer.provideMerge(ImportNamesImpl.Layer),
   Layer.provideMerge(PortableImpl.Layer),
   Layer.provideMerge(RelocImpl.Layer),
   Layer.provideMerge(GateImpl.Layer),
@@ -163,6 +166,56 @@ const program = Effect.gen(function* () {
     } else {
       console.log('\n  recorded only; pass a directory to write the tree.');
     }
+  }
+
+  if (wants('imports')) {
+    const r = yield* (yield* modules.ImportNames).nameImportSlots();
+    console.log(rule('import names -- read out of the libraries\' own relocation tables'));
+    console.log(row('CRT identifications read', r.identifications));
+    console.log(row('library sections confirmed in the image', r.sectionsPlaced));
+    console.log(row('__imp_ relocations in them', r.relocations));
+    console.log(row('references confirmed against the image', r.referencesConfirmed));
+    for (const f of r.formCounts) console.log(`    ${String(f.count).padStart(8)}  ${f.form}`);
+    console.log(row('refused', r.refusals));
+    for (const f of r.refusalReasons) console.log(`    ${String(f.count).padStart(8)}  ${f.reason}`);
+    console.log(row('slots referenced', r.slotsReferenced));
+    console.log(row('call-site bindings written', r.bindingsWritten));
+    console.log(row('call sites the dump names too, same name', r.bindingsReproduced));
+    console.log(
+      row('call sites the dump names too, same address', r.bindingsAliasResolved.length),
+    );
+    for (const a of r.bindingsAliasResolved) {
+      console.log(
+        `    slot ${hex(a.slot)} site ${hex(a.callSite)}  ${a.cachedApi} and ` +
+          `${a.libraryApi} are both at that address (${a.cachedTargetExports.join(', ')})`,
+      );
+    }
+    console.log(row('call sites the dump names too, DISAGREEING', r.bindingDisagreements.length));
+    for (const d of r.bindingDisagreements) {
+      console.log(
+        `    slot ${hex(d.slot)} site ${hex(d.callSite)}  the cache resolved it to ` +
+          `${hex(d.cachedTarget)} (${d.cachedTargetExports.join(', ') || 'no export'}), ` +
+          `the library links it against ${d.libraryApi}`,
+      );
+    }
+    console.log(row('slots NAMED by this derivation', r.slotsNamed.length));
+    for (const n of r.slotsNamed) console.log(`    ${hex(n.slot)}  ${n.name}`);
+    console.log(row('already-named slots reproduced', r.slotsReproduced.length));
+    for (const n of r.slotsReproduced) console.log(`    ${hex(n.slot)}  ${n.name}`);
+    console.log(row('already-named slots serving MORE APIs', r.disagreements.length));
+    for (const d of r.disagreements) {
+      console.log(
+        `    ${hex(d.slot)}  ${d.storedName} from ${d.cachedSites} cached site(s); ` +
+          `${d.librarySites} library site(s) name ${d.libraryApis.join(', ')}`,
+      );
+    }
+    console.log(row('referenced slots still unnamed', r.slotsStillUnnamed.length));
+    for (const u of r.slotsStillUnnamed) {
+      console.log(`    ${hex(u.slot)}  ${u.reason}; the libraries name ${u.apis.join(', ')}`);
+    }
+    // A contradiction about one call site means one of the two derivations is
+    // wrong. Everything else above is a finding, not a failure.
+    if (r.bindingDisagreements.length !== 0) failures += 1;
   }
 
   return failures;

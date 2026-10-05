@@ -305,14 +305,31 @@ export class SubjectImpl
     );
     const db: IDb = this.dependencies.Db;
     yield* db.tx(function* () {
-      yield* db.run('DELETE FROM import_bindings WHERE subject_sha = ?', [subject.sha256]);
+      // Scoped to the rows this derivation produces. The library-derived
+      // bindings come out of the LIBRARIES' relocation tables and the image's
+      // own bytes, neither of which this read touches, so deleting them here
+      // would retract evidence a refresh says nothing about. A refresh is not
+      // a retraction.
+      yield* db.run('DELETE FROM import_bindings WHERE subject_sha = ? AND evidence <> ?', [
+        subject.sha256,
+        'library-relocation',
+      ]);
       yield* db.run('DELETE FROM safedisc_records WHERE subject_sha = ?', [subject.sha256]);
-      yield* db.run('DELETE FROM import_slots WHERE subject_sha = ?', [subject.sha256]);
+      // Upserted rather than deleted and reinserted, for the same reason: a
+      // name this read cannot produce must survive it. The declared slot set
+      // is a function of the subject's own bytes, which `subject_sha` pins, so
+      // there is no row here that this read could have made obsolete.
       for (const slot of imports.slots) {
         yield* db.run(
           `INSERT INTO import_slots(subject_sha, slot, dll, target, resolution, name,
                                     descriptor_name, descriptor_ordinal, blocked_by)
-           VALUES (?,?,?,?,?,?,?,?,?)`,
+           VALUES (?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(subject_sha, slot) DO UPDATE SET
+             dll = excluded.dll, target = excluded.target, resolution = excluded.resolution,
+             name = COALESCE(excluded.name, import_slots.name),
+             descriptor_name = excluded.descriptor_name,
+             descriptor_ordinal = excluded.descriptor_ordinal,
+             blocked_by = excluded.blocked_by`,
           [
             subject.sha256,
             slot.va,
@@ -347,9 +364,19 @@ export class SubjectImpl
         }
         for (const binding of slot.bindings) {
           yield* db.run(
+            // The dump's cache is direct evidence of what a call site actually
+            // resolved to, so where it covers a site a library relocation also
+            // names, it replaces that row rather than colliding with it. The
+            // library derivation then re-reads this and reports the pair as
+            // agreeing or contradicting, which is where that comparison
+            // belongs.
             `INSERT INTO import_bindings(subject_sha, slot, call_site, api, evidence,
                                          target, bucket, call_operand, blocked_by)
-             VALUES (?,?,?,?,?,?,?,?,?)`,
+             VALUES (?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(subject_sha, slot, call_site) DO UPDATE SET
+               api = excluded.api, evidence = excluded.evidence, target = excluded.target,
+               bucket = excluded.bucket, call_operand = excluded.call_operand,
+               blocked_by = excluded.blocked_by`,
             [
               subject.sha256,
               slot.va,

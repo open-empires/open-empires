@@ -11,6 +11,7 @@ import type { ICompose } from './compose/interface';
 import type { IPortable } from './portable/interface';
 import type { IReloc } from './reloc/interface';
 import type { INames } from './names/interface';
+import type { IImportNames } from './import-names/interface';
 
 /**
  * The decompilation service.
@@ -40,6 +41,10 @@ export enum Modules {
   /** Read the original function names back out of the subject's own strings,
    *  which is the only source of them this binary still carries. */
   Names = 'Names',
+  /** Name import slots from the relocation tables of the libraries whose
+   *  objects are already identified in the image. The library states which
+   *  symbol each call site targets, so no name is inferred from a call shape. */
+  ImportNames = 'ImportNames',
   /** The one-time move of the Python tooling's files into this database. Not
    *  part of serving; it runs once, from `src/import.ts`. */
   Legacy = 'Legacy',
@@ -51,5 +56,6 @@ export const modules = interfaces<
     Db: IDb; Subject: ISubject; Disasm: IDisasm; Gate: IGate;
     Work: IWork; Registry: IRegistry; Metrics: IMetrics; Legacy: ILegacy;
     Compose: ICompose; Portable: IPortable; Reloc: IReloc; Names: INames;
+    ImportNames: IImportNames;
   }
 >(Modules);

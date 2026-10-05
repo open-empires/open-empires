@@ -36,6 +36,13 @@ export interface CoffSection {
 
 export interface CoffSymbol {
   readonly name: string;
+  /**
+   * Index in the object's symbol table, COUNTING auxiliary records. A
+   * relocation refers to its symbol by this number, so it is not the position
+   * in the array `symbols` returns -- that array has the auxiliary records
+   * skipped, which shifts every index after the first one.
+   */
+  readonly index: number;
   /** Offset within its section. */
   readonly value: number;
   /** 1-based section number; <= 0 means absolute/undefined/debug. */
@@ -120,6 +127,7 @@ export const symbols = (obj: Uint8Array): ReadonlyArray<CoffSymbol> => {
     const auxiliaryCount = obj[at + 17]!;
     out.push({
       name: symbolName(obj, view, at, stringTable),
+      index: k,
       value: view.getUint32(at + 8, true),
       sectionNumber: view.getInt16(at + 12, true),
       storageClass: obj[at + 16]!,
@@ -130,18 +138,40 @@ export const symbols = (obj: Uint8Array): ReadonlyArray<CoffSymbol> => {
   return out;
 };
 
-/** Relocation fields of one section: (offset, type) pairs. */
+/** Absolute 32-bit address. The linker writes the symbol's final address into
+ *  the four bytes at the relocation's offset. */
+export const RelocationType = { Dir32: 6 } as const;
+
+export interface CoffRelocation {
+  readonly offset: number;
+  readonly type: number;
+  /** `CoffSymbol.index` of the symbol this relocation names. */
+  readonly symbolIndex: number;
+}
+
+/**
+ * Relocation fields of one section.
+ *
+ * `symbolIndex` is the whole point for anything that asks WHAT a patched field
+ * refers to: the object states the external symbol each `call dword ptr [...]`
+ * site targets, so the name comes from the library's own symbol table rather
+ * than from the shape of the call.
+ */
 export const relocations = (
   obj: Uint8Array,
   section: CoffSection,
-): ReadonlyArray<{ offset: number; type: number }> => {
+): ReadonlyArray<CoffRelocation> => {
   if (section.relocationCount === 0 || section.relocationPointer === 0) return [];
   const view = new DataView(obj.buffer, obj.byteOffset, obj.byteLength);
-  const out: { offset: number; type: number }[] = [];
+  const out: CoffRelocation[] = [];
   for (let i = 0; i < section.relocationCount; i++) {
     const at = section.relocationPointer + i * 10;
     if (at + 10 > obj.length) break;
-    out.push({ offset: view.getUint32(at, true), type: view.getUint16(at + 8, true) });
+    out.push({
+      offset: view.getUint32(at, true),
+      symbolIndex: view.getUint32(at + 4, true),
+      type: view.getUint16(at + 8, true),
+    });
   }
   return out;
 };

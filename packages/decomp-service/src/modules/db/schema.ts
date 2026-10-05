@@ -640,4 +640,216 @@ WHERE v.exact = 1
        OR tg.cl_sha256  != tc.cl_sha256);
 `,
   },
+  {
+    id: '006-library-import-names',
+    sql: `
+-- --------------------------------- import names from the libraries' own tables
+--
+-- 105 of the subject's 255 import slots have no name, because the loader
+-- overwrote the only copy of them in place and the slots hold SafeDisc stubs.
+-- The project's rule has been never to guess an API name from a call's shape,
+-- and that rule stands: arity and argument kinds only constrain.
+--
+-- There is a route that does not guess. The image contains prebuilt CRT code
+-- from the install's own LIBC.LIB -- \`crt_identifications\` names 297 of those
+-- addresses by byte-matching library objects against the image -- and a
+-- library object carries a RELOCATION TABLE naming the external symbol each of
+-- its \`call dword ptr [...]\` sites targets. Place the object's bytes in the
+-- image, and the relocation says which slot that call site uses and what the
+-- library calls it. The name comes from the library's own symbol table.
+--
+-- WHAT EACH ROW BELOW ASSERTS, AND WHAT IT DOES NOT
+-- ------------------------------------------------
+-- A row asserts that the four bytes at \`site + 2\` in the image are the slot,
+-- that the instruction at \`site\` is one that reads through it, and that the
+-- object whose relocation named it is placed over those very bytes. It asserts
+-- nothing about the slot as a whole: an API is keyed by (slot, call site), and
+-- the derivation itself demonstrates why. 11 slots the dump named from its
+-- SafeDisc cache are referenced by CRT call sites that link against a
+-- DIFFERENT API, so the slot-level name is incomplete rather than wrong -- one
+-- stub serves several APIs and the dispatcher picks on the caller's return
+-- address.
+CREATE TABLE library_import_references (
+    subject_sha       TEXT NOT NULL REFERENCES subjects(sha256),
+    -- Address of the referencing instruction in the image, so the claim can be
+    -- checked against the bytes rather than taken on trust.
+    site              INTEGER NOT NULL,
+    slot              INTEGER NOT NULL,
+    -- Undecorated, as the loader resolves it. Stored without the DLL because
+    -- which DLL the slot belongs to is import_slots' answer, not this one's.
+    api               TEXT NOT NULL,
+    -- The symbol exactly as the object names it: \`__imp__HeapAlloc@12\`. The
+    -- undecorated name above is derived from this, so the derivation is
+    -- re-checkable from the stored evidence.
+    decorated         TEXT NOT NULL,
+    library           TEXT NOT NULL,
+    member            TEXT NOT NULL,
+    section_index     INTEGER NOT NULL,
+    -- Where that section sits in the image, from the identification's address
+    -- less the symbol's offset in the section. The whole section's
+    -- non-relocated bytes are confirmed against the image at this address
+    -- before any relocation of it is read.
+    section_base      INTEGER NOT NULL,
+    relocation_offset INTEGER NOT NULL,
+    -- call-indirect | jmp-indirect | load-pointer | push-pointer. Only the
+    -- first two are call sites; the others read the slot into a register or
+    -- onto the stack and the call happens elsewhere, so they name the slot
+    -- without naming a call site.
+    form              TEXT NOT NULL,
+    PRIMARY KEY (subject_sha, site)
+);
+CREATE INDEX library_import_references_slot ON library_import_references(subject_sha, slot);
+
+-- Every relocation this derivation did NOT turn into a name, and why.
+--
+-- A count of what was dropped answers "how many"; only the rows answer "which
+-- ones and why", which is what is actually needed when a slot has no name and
+-- somebody wants to know whether that is an absence or a refusal.
+CREATE TABLE library_import_refusals (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_sha       TEXT NOT NULL REFERENCES subjects(sha256),
+    library           TEXT NOT NULL,
+    member            TEXT NOT NULL,
+    section_index     INTEGER NOT NULL,
+    relocation_offset INTEGER,          -- null: the refusal is of the whole section
+    decorated         TEXT,             -- null: no relocation is in question
+    reason            TEXT NOT NULL
+);
+CREATE INDEX library_import_refusals_member
+    ON library_import_refusals(subject_sha, library, member);
+
+-- import_bindings is rebuilt so a library-derived binding can be recorded at
+-- all. \`target\` is the address SafeDisc's dispatcher cached and \`bucket\` is
+-- which of its cache slots held it: both belong to the dump, and a binding
+-- read out of a library's relocation table has neither. They were NOT NULL, so
+-- the only way to store such a row was to write 0 into both -- a number a
+-- reader cannot distinguish from a real cached address of zero, and the exact
+-- shape of "a writer that skips a field is a second format".
+ALTER TABLE import_bindings RENAME TO import_bindings_002;
+CREATE TABLE import_bindings (
+    subject_sha   TEXT NOT NULL REFERENCES subjects(sha256),
+    slot          INTEGER NOT NULL,
+    call_site     INTEGER NOT NULL,
+    api           TEXT,                -- null: the target is not an export
+    evidence      TEXT NOT NULL,
+    target        INTEGER,             -- null: not derived from the dump's cache
+    bucket        INTEGER,             -- null: likewise
+    call_operand  INTEGER,             -- set only when it names another slot
+    blocked_by    TEXT,
+    PRIMARY KEY (subject_sha, slot, call_site)
+);
+INSERT INTO import_bindings(subject_sha, slot, call_site, api, evidence, target,
+                            bucket, call_operand, blocked_by)
+SELECT subject_sha, slot, call_site, api, evidence, target, bucket, call_operand, blocked_by
+FROM import_bindings_002;
+DROP TABLE import_bindings_002;
+
+-- ONE NAME PER EXPORT ADDRESS, BECAUSE WINE PUBLISHES SEVERAL
+--
+-- The guest's kernel32 exports ordinal 600 \`LockResource\` and ordinal 787
+-- \`SetHandleCount\` at the SAME entry point, 0x7C80CD37. The dump can only say
+-- which address a call reached, so it names such a call by whichever export
+-- sits there; a library relocation names the other. Counting those as two APIs
+-- would turn one slot with one API into a contradiction.
+--
+-- So the canonical name is chosen WITHIN ONE MODULE and looked up BY NAME, not
+-- by the address a call resolved to. Resolving by address instead loses every
+-- forwarded export: \`kernel32!GetLastError\` forwards to ntdll and has no
+-- address of its own, so the address a call reached is
+-- \`RtlGetLastWin32Error\` -- which the import map has already un-forwarded
+-- back to the name kernel32 publishes. Re-deriving it from the address undoes
+-- that, and 6 slots whose two sources agree were reported as contradictions.
+CREATE VIEW guest_export_canonical AS
+SELECT subject_sha, module_base, va, MIN(name) AS canonical
+  FROM guest_exports
+ WHERE va IS NOT NULL AND name IS NOT NULL
+ GROUP BY subject_sha, module_base, va;
+
+CREATE VIEW guest_export_alias AS
+SELECT e.subject_sha, e.module_base, LOWER(e.name) AS name, c.canonical
+  FROM guest_exports e
+  JOIN guest_export_canonical c
+    ON c.subject_sha = e.subject_sha AND c.module_base = e.module_base AND c.va = e.va
+ WHERE e.name IS NOT NULL AND e.va IS NOT NULL;
+
+-- Every API an import slot is known to serve, from which evidence, and from
+-- how many sites.
+--
+-- The one place that question is answered, so "does this slot have a single
+-- name" is a query and not a second derivation. More than one API for a slot
+-- means it has no single name -- which is an answer, not a gap: SafeDisc's
+-- dispatcher resolves on the caller's return address, so one stub serves
+-- several APIs.
+CREATE VIEW import_slot_apis AS
+WITH slot_module AS (
+  SELECT s.subject_sha, s.slot, s.dll, m.base AS module_base
+    FROM import_slots s
+    LEFT JOIN guest_modules m
+      ON m.subject_sha = s.subject_sha AND LOWER(m.name) = LOWER(s.dll)
+),
+cached AS (
+  SELECT b.subject_sha, b.slot,
+         substr(b.api, 1, instr(b.api, '!')) ||
+           COALESCE(a.canonical, substr(b.api, instr(b.api, '!') + 1)) AS api,
+         'safedisc-cache' AS source
+    FROM import_bindings b
+    JOIN slot_module k ON k.subject_sha = b.subject_sha AND k.slot = b.slot
+    LEFT JOIN guest_export_alias a
+      ON a.subject_sha = b.subject_sha AND a.module_base = k.module_base
+     AND a.name = LOWER(substr(b.api, instr(b.api, '!') + 1))
+   WHERE b.api IS NOT NULL AND b.evidence <> 'library-relocation'
+),
+library AS (
+  SELECT r.subject_sha, r.slot,
+         k.dll || '!' || COALESCE(a.canonical, r.api) AS api,
+         'library-relocation' AS source
+    FROM library_import_references r
+    JOIN slot_module k ON k.subject_sha = r.subject_sha AND k.slot = r.slot
+    LEFT JOIN guest_export_alias a
+      ON a.subject_sha = r.subject_sha AND a.module_base = k.module_base
+     AND a.name = LOWER(r.api)
+)
+SELECT subject_sha, slot, api, source, COUNT(*) AS sites
+  FROM (SELECT * FROM cached UNION ALL SELECT * FROM library)
+ GROUP BY subject_sha, slot, api, source;
+
+-- Every (slot, call site) BOTH sources name, and whether they agree.
+--
+-- This is the only independent check the library derivation has: the dump
+-- named 150 slots by a completely unrelated route -- SafeDisc's own cache of
+-- (call site -> resolved address) pairs -- so a call site both sources reach
+-- is one the two can be held against each other at.
+--
+--   agrees                   the cached export and the library's symbol are
+--                            the same name.
+--   same-address-other-name  the library's symbol is published AT the address
+--                            the call resolved to, under another name. Wine
+--                            puts \`LockResource\` and \`SetHandleCount\` on one
+--                            entry point, so the dump cannot tell which name
+--                            the site was linked against and the library can.
+--                            Agreement, with the ambiguity resolved.
+--   disagrees                the library's symbol is not at that address at
+--                            all, so the two are about different code. One of
+--                            the derivations is wrong about this call site.
+--                            A finding, never merged.
+CREATE VIEW import_binding_agreement AS
+SELECT r.subject_sha, r.slot, r.site AS call_site,
+       b.api     AS cached_api,
+       b.target  AS cached_target,
+       r.api     AS library_api,
+       CASE
+         WHEN LOWER(substr(b.api, instr(b.api, '!') + 1)) = LOWER(r.api) THEN 'agrees'
+         WHEN EXISTS (SELECT 1 FROM guest_exports e
+                       WHERE e.subject_sha = r.subject_sha
+                         AND e.va = b.target
+                         AND LOWER(e.name) = LOWER(r.api)) THEN 'same-address-other-name'
+         ELSE 'disagrees'
+       END AS verdict
+  FROM library_import_references r
+  JOIN import_bindings b
+    ON b.subject_sha = r.subject_sha AND b.slot = r.slot AND b.call_site = r.site
+   AND b.evidence <> 'library-relocation'
+ WHERE b.api IS NOT NULL;
+`,
+  },
 ];
