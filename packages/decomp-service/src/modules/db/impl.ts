@@ -7,9 +7,33 @@ import { modules } from '../index';
 import { DbError, type IDb } from './interface';
 import { MIGRATIONS } from './schema';
 
-export const DB_PATH = path.resolve(
-  process.env.DECOMP_DB ?? path.join(import.meta.dir, '../../../data/decomp.db'),
-);
+/**
+ * Where the database is, resolved on every call rather than once at import.
+ *
+ * It used to be a module-level const, and that silently let a TEST write to
+ * the system of record. `subject.test.ts` sets `DECOMP_DB` to a scratch path
+ * and then dynamically imports this module so the new value is picked up --
+ * which works only if nothing has imported it yet. Bun runs a suite in one
+ * process, so when any other test file loaded this module first, the import
+ * returned the CACHED module still holding the live path, and the test wrote
+ * 6,570 inventory rows into the live database.
+ *
+ * That is how five addresses recorded as NOT function entries came back,
+ * labelled `discovered_by='inventory'` by a test fixture, and how roughly one
+ * run in three failed with "database is locked" -- the test was contending
+ * with the running service for the live write lock. The flake was the
+ * harmless symptom of a test mutating production data.
+ *
+ * Resolved per call, the scratch path is honoured whatever the import order.
+ */
+export const dbPath = (): string =>
+  path.resolve(
+    process.env.DECOMP_DB ?? path.join(import.meta.dir, '../../../data/decomp.db'),
+  );
+
+/** @deprecated Read `dbPath()`. Kept so existing imports keep compiling; it
+ *  is the path as of module load, which is the bug described above. */
+export const DB_PATH = dbPath();
 
 const KEY = Symbol.for('open-empires.decomp.db');
 const TX_KEY = Symbol.for('open-empires.decomp.db.transaction');
@@ -42,17 +66,26 @@ const transactionLock = (): Semaphore.Semaphore => {
  *  reloading a module does not leak a handle per edit. */
 export const handle = (): Database => {
   const g = globalThis as Record<symbol, unknown>;
-  const existing = g[KEY];
-  if (existing !== undefined) return existing as Database;
-  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-  const db = new Database(DB_PATH, { create: true });
+  const want = dbPath();
+  const existing = g[KEY] as { db: Database; path: string } | undefined;
+  // Keyed by PATH. A cached connection to a different file is not this
+  // database, and returning it anyway is what let a test's writes land in
+  // the live one.
+  if (existing !== undefined && existing.path === want) return existing.db;
+  fs.mkdirSync(path.dirname(want), { recursive: true });
+  const db = new Database(want, { create: true });
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA foreign_keys = ON');
   // Readers must not fail while the gate worker is committing a batch.
   db.exec('PRAGMA busy_timeout = 10000');
-  g[KEY] = db;
+  g[KEY] = { db, path: want };
   return db;
 };
+
+/** The file the live connection is open on. A harness has to be able to name
+ *  its subject: a test that believes it is on a scratch database and is not
+ *  reports success about the wrong file. */
+export const openPath = (): string => dbPath();
 
 const fail = (sql: string) => (cause: unknown) =>
   new DbError({

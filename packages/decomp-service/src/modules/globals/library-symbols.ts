@@ -42,7 +42,6 @@ import {
   type ImageBytes,
   type LibraryMember,
   type PlacedIdentification,
-  type PlacedSection,
 } from '../../coff/placement';
 import type { LibrarySymbol, SizeBasis } from './interface';
 
@@ -365,5 +364,3 @@ const readDword = (image: ImageBytes, va: number): Option.Option<number> => {
 
 const inAnySection = (image: ImageBytes, va: number): boolean =>
   va >= image.base && va < image.base + image.bytes.length;
-
-export type { PlacedSection };

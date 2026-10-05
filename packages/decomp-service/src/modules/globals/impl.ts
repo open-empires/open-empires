@@ -248,7 +248,6 @@ export class GlobalsImpl
       image,
       dataRegion: region.dataRegion,
       sectionOf: region.sectionOf,
-      isCode: region.isCode,
     });
 
     const importSlots = new Set(

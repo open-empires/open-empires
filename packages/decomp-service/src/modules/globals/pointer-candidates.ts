@@ -46,7 +46,6 @@ export const scanPointerCandidates = (input: {
   readonly image: { readonly base: number; readonly bytes: Uint8Array };
   readonly dataRegion: ReadonlyArray<DataRegionSection>;
   readonly sectionOf: (va: number) => string | undefined;
-  readonly isCode: (va: number) => boolean;
 }): PointerScan => {
   const { image } = input;
   const view = new DataView(image.bytes.buffer, image.bytes.byteOffset, image.bytes.byteLength);
@@ -111,10 +110,3 @@ export const scanPointerCandidates = (input: {
     zero,
   };
 };
-
-/** Does this candidate point at code? Kept beside the scan so "code or data"
- *  has one answer and the report and the inventory cannot disagree. */
-export const targetKind = (
-  candidate: PointerCandidate,
-  isCode: (va: number) => boolean,
-): 'code' | 'data' => (isCode(candidate.value) ? 'code' : 'data');

@@ -42,7 +42,23 @@ if (missing.length > 0) {
   for (const suffix of ['', '-wal', '-shm']) fs.rmSync(`${dbPath}${suffix}`, { force: true });
   process.env.DECOMP_DB = dbPath;
 
-  const { DbImpl } = await import('../db/impl');
+  const { DbImpl, openPath } = await import('../db/impl');
+
+  // NAME THE SUBJECT. Setting DECOMP_DB and re-importing only worked while
+  // this module had not been imported yet; Bun runs the suite in one process,
+  // so when any other test file loaded db/impl first, the import returned the
+  // cached module holding the LIVE path and this fixture wrote 6,570 rows
+  // into the system of record -- resurrecting addresses recorded as not being
+  // function entries, and failing about one run in three on the live write
+  // lock. The connection is now keyed by path, and this asserts it, so the
+  // fixture can never again be about the wrong file.
+  if (openPath() !== dbPath) {
+    throw new Error(
+      `this test must run against a scratch database. Expected ${dbPath}, ` +
+        `the connection resolves to ${openPath()}.`,
+    );
+  }
+
   const { SubjectImpl } = await import('./impl');
   const { modules } = await import('../index');
 
