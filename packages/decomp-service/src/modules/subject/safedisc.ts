@@ -53,9 +53,20 @@ import type { GuestMemory } from './guest-memory';
  * on the call site as well as the slot, and several distinct APIs are reached
  * through one slot. The key is the pair, never the slot alone.
  */
-export const DISPATCHER = 0x00cc3270; // read from every stub's call-through pointer
-export const MODULE_TABLE = 0x00ce3e93; // mov ecx, [eax + 0xCE3E93]
-export const REMAP_TABLE = 0x00ce3e20; // mov edx, [ecx + 0xCE3E20]
+/**
+ * The DLL the dispatcher and its tables live in, and their offsets inside it.
+ *
+ * The addresses above were read at the base this DLL happened to be mapped at
+ * in one dump, 0x00CC0000. Nothing holds it there: in a second dump taken from
+ * a fresh boot of the same machine it was at 0x00D40000, and every absolute
+ * address in this file was 0x80000 short. So the base is looked up in the
+ * guest's own loader list and the offsets, which ARE properties of the DLL's
+ * code, are added to it.
+ */
+export const SAFEDISC_LOADER_DLL = 'dplayerx.dll';
+export const DISPATCHER_OFFSET = 0x3270; // 0x00CC3270 - 0x00CC0000
+export const MODULE_TABLE_OFFSET = 0x23e93; // mov ecx, [eax + 0xCE3E93]
+export const REMAP_TABLE_OFFSET = 0x23e20; // mov edx, [ecx + 0xCE3E20]
 export const MODULE_STRIDE = 0x89; // imul eax, eax, 0x89
 export const RECORD_SIZE = 0x377; // imul edx, edx, 0x377
 export const BUCKET_COUNT = 101; // mov ecx, 0x65 ; div ecx
@@ -138,13 +149,16 @@ export class RedirectTable {
 
   static read(
     memory: GuestMemory,
+    loaderBase: number,
     counts: ReadonlyMap<number, number>,
   ): Result.Result<RedirectTable, GuestReadError | SubjectParseError> {
+    const moduleTable = loaderBase + MODULE_TABLE_OFFSET;
+    const remapTableBase = loaderBase + REMAP_TABLE_OFFSET;
     return Result.gen(function* () {
       const modules: RedirectModule[] = [];
       for (const index of [...counts.keys()].sort((a, b) => a - b)) {
-        const recordArray = yield* memory.requireU32(MODULE_TABLE + index * MODULE_STRIDE);
-        const remapTable = yield* memory.requireU32(REMAP_TABLE + index * MODULE_STRIDE);
+        const recordArray = yield* memory.requireU32(moduleTable + index * MODULE_STRIDE);
+        const remapTable = yield* memory.requireU32(remapTableBase + index * MODULE_STRIDE);
         const records: ImportRecord[] = [];
         for (let i = 0; i < counts.get(index)!; i++) {
           records.push(yield* readRecord(memory, { index, recordArray, remapTable }, i));
@@ -164,15 +178,18 @@ export class RedirectTable {
  * number of consecutive records that do, so it is derived from the table
  * rather than assumed from the import descriptors.
  */
-export const moduleRecordCounts = (memory: GuestMemory): ReadonlyMap<number, number> => {
+export const moduleRecordCounts = (
+  memory: GuestMemory,
+  loaderBase: number,
+): ReadonlyMap<number, number> => {
   const out = new Map<number, number>();
   for (let index = 0; index < MODULE_INDEX_COUNT; index++) {
-    const array = memory.u32(MODULE_TABLE + index * MODULE_STRIDE);
+    const array = memory.u32(loaderBase + MODULE_TABLE_OFFSET + index * MODULE_STRIDE);
     if (Option.isNone(array) || array.value === 0) continue;
     let count = 0;
     while (count < 4096) {
       const pointer = memory.u32(array.value + count * RECORD_SIZE + DISPATCHER_PTR_AT);
-      if (Option.isNone(pointer) || pointer.value !== DISPATCHER) break;
+      if (Option.isNone(pointer) || pointer.value !== loaderBase + DISPATCHER_OFFSET) break;
       count++;
     }
     if (count > 0) out.set(index, count);

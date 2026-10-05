@@ -111,7 +111,22 @@ const probe = async () => {
   if (Date.now() - startedAt < GRACE_MS) return;
   try {
     const r = await fetch(`http://127.0.0.1:${PORT}/api/health`, {
-      signal: AbortSignal.timeout(5000),
+      // 20s, not 5s.
+      //
+      // This watchdog exists to catch a service that is LISTENING BUT
+      // BROKEN -- the state in which a stray paren served errors for 75
+      // minutes while the socket accepted connections. It was also killing a
+      // service that was merely BUSY. Describing one work item disassembles
+      // a function and fingerprints 400 sibling candidates, which is
+      // synchronous CPU work of a few seconds; a six-item claim of large
+      // functions took 25s, the 5s probe timed out three times, and the
+      // supervisor shot the child in the middle of the request. The agent
+      // lost the claim it had just been granted.
+      //
+      // Answering late is correct behaviour under load. Answering never is
+      // not, and 20s with three strikes at 10s intervals still catches that
+      // in about a minute.
+      signal: AbortSignal.timeout(20_000),
     });
     const body = (await r.json()) as { ok?: boolean; checks?: { name: string; ok: boolean; detail: string }[] };
     if (r.ok && body.ok === true) {

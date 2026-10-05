@@ -26,7 +26,7 @@ import {
   type PeImage,
 } from './pe';
 import { ModuleMap } from './module-map';
-import { moduleRecordCounts, RedirectTable } from './safedisc';
+import { moduleRecordCounts, RedirectTable, SAFEDISC_LOADER_DLL } from './safedisc';
 import { buildImportMap } from './import-map';
 import { identifyCrtFunctions } from './crt-match';
 import {
@@ -299,7 +299,22 @@ export class SubjectImpl
     const { memory, subject, image } = yield* this.openGuest();
     const map = yield* required(ModuleMap.load(memory, subject.imageBase));
     const declared = yield* required(parseImportSlots(image));
-    const table = yield* required(RedirectTable.read(memory, moduleRecordCounts(memory)));
+    // SafeDisc's dispatcher and tables are addressed from the base its loader
+    // DLL is actually mapped at in THIS dump, because that base moves between
+    // boots -- 0x00CC0000 in the first dump, 0x00D40000 in the second.
+    const loader = map.moduleNamed(SAFEDISC_LOADER_DLL);
+    if (Option.isNone(loader)) {
+      return yield* Effect.fail(
+        new GuestMapError({
+          reason:
+            `${SAFEDISC_LOADER_DLL} is not in the guest's loader list, so SafeDisc's ` +
+            'redirection tables have no base to be read from',
+        }),
+      );
+    }
+    const table = yield* required(
+      RedirectTable.read(memory, loader.value.base, moduleRecordCounts(memory, loader.value.base)),
+    );
     const imports = yield* required(
       buildImportMap({ image, memory, moduleMap: map, table, declared }),
     );

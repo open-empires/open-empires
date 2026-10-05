@@ -136,9 +136,18 @@ export class WorkImpl
        -- one of those raises the ceiling again. A plain 'at most the largest proven'
        -- could never rise at all, because nothing above the ceiling would
        -- ever be served to raise it.
+       -- UNCORRELATED. Written so the subquery referenced the outer row's
+       -- subject_sha, SQLite re-ran a full aggregate over the proven VIEW --
+       -- itself a join across several tables -- once per row of functions. A
+       -- two-item claim took 51.7 seconds, of which describing the two items
+       -- accounted for 462ms; all the rest was this clause, 6,982 times. The
+       -- subject is already fixed by the join to current_config above, so the
+       -- ceiling is one value and is computed once.
          AND f.size <= (
-           SELECT MAX(1024, 2 * COALESCE(MAX(p2.size), 0)) FROM proven p2
-            WHERE p2.subject_sha = f.subject_sha
+           SELECT MAX(1024, 2 * COALESCE(MAX(p2.size), 0))
+             FROM proven p2
+             JOIN current_config c2
+               ON c2.only_row = 1 AND c2.subject_sha = p2.subject_sha
          )
        ORDER BY f.size DESC
        LIMIT ?`,
@@ -154,6 +163,22 @@ export class WorkImpl
         [r.va, agentId, t, t + leaseSeconds],
       );
       items.push(yield* this.describe(r.va, r.size));
+      // YIELD THE EVENT LOOP between items.
+      //
+      // Describing one function disassembles it and fingerprints 400
+      // candidate siblings, which is synchronous CPU work -- about four
+      // seconds for a function of a few thousand bytes. Six of those in one
+      // request is 25 seconds during which nothing else is answered,
+      // /api/health included, so the supervisor's probe timed out and it
+      // killed the child MID-REQUEST: the agent saw a dead connection and
+      // the claim it had just been granted was lost. The service's own
+      // watchdog was shooting it for being busy.
+      //
+      // A one-millisecond sleep is a real turn of the loop, so health is
+      // answered between items and a long claim costs latency instead of the
+      // process. It cannot be an Effect-level yield: the expensive part is a
+      // synchronous callback the runtime cannot preempt.
+      yield* Effect.sleep(1);
     }
     return items;
   }
@@ -183,7 +208,16 @@ export class WorkImpl
    *  agent needs no files and no second call. */
   private *describe(va: number, size: number): EffectGen<WorkItem, WorkFailure> {
     const db = this.dependencies.Db;
+    // Timed, because a claim of six large functions took 63 seconds and
+    // nearly tripped the supervisor's watchdog, and nothing could say which
+    // part was slow. A queue nobody can see is a queue nobody fixes.
+    const started = Date.now();
+    const marks: string[] = [];
+    const mark = (what: string) => {
+      marks.push(`${what}=${Date.now() - started}ms`);
+    };
     const img = yield* this.image();
+    mark('image');
     // A proof is the only thing that establishes the recorded extent is the
     // function's true extent, and it decides whether an undecodable tail is
     // a switch table in the body or half an instruction past a wrong size.
@@ -194,6 +228,7 @@ export class WorkImpl
     const listing = yield* this.dependencies.Disasm.listing(
       img, { va, size }, Option.none(), (provenHere?.n ?? 0) > 0,
     );
+    mark('listing');
 
     const prior = yield* db.all(
       `SELECT a.flags AS flags, v.exact AS exact, v.first_diff AS first_diff,
@@ -216,6 +251,7 @@ export class WorkImpl
        ORDER BY ABS(p.va - ?) LIMIT ?`,
       [va, SIBLING_POOL],
     );
+    mark('queries');
     const ranked = yield* this.dependencies.Disasm.rankSiblings(
       img,
       { va, size },
@@ -224,6 +260,7 @@ export class WorkImpl
         return { va: o.va, size: o.size };
       }),
     );
+    mark('rankSiblings');
     const top = ranked.slice(0, SIBLINGS_RETURNED);
     const sources = new Map<number, string>();
     for (const s of top) {
@@ -236,6 +273,11 @@ export class WorkImpl
       if (row !== null) sources.set(s.va, row.source);
     }
 
+    mark('siblingSources');
+    console.log(
+      `[claim] 0x${va.toString(16)} ${size}B described in ` +
+        `${Date.now() - started}ms (${marks.join(' ')})`,
+    );
     return {
       va,
       size,
