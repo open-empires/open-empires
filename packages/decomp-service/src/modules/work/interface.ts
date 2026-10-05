@@ -133,8 +133,16 @@ export interface IWork {
    *  shape with something already solved. Returns fewer if the queue is
    *  short, and none if it is empty -- which is the signal to run the
    *  producer, not to spin. */
-  claim(agentId: string, count: number, leaseSeconds: number):
-    EffectGen<ReadonlyArray<WorkItem>, WorkFailure>;
+  /** `vas` asks for specific addresses instead of taking the queue's choice.
+   *  Needed whenever an agent already knows what it wants: resuming after an
+   *  outage dropped its lease, or re-attempting a parked near-miss. Without
+   *  it, work solved but not yet recorded could not be recovered at all. */
+  claim(
+    agentId: string,
+    count: number,
+    leaseSeconds: number,
+    vas?: ReadonlyArray<number>,
+  ): EffectGen<ReadonlyArray<WorkItem>, WorkFailure>;
 
   /** Submit source for a claimed function. The service compiles it and
    *  returns the verdict; the agent never runs the compiler. */

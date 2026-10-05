@@ -19,9 +19,10 @@
  *   a second worker fighting the first for the same lock. That has happened.
  */
 import { Effect, Layer, Option, pipe } from 'effect';
+import { check as healthCheck, report as healthReport } from './health';
 import { modules } from './modules';
 import { ComposeImpl } from './modules/compose/impl';
-import { DbImpl } from './modules/db/impl';
+import { DbImpl, handle as dbHandle } from './modules/db/impl';
 import { DisasmImpl } from './modules/disasm/impl';
 import { GateImpl } from './modules/gate/impl';
 import { LegacyImpl } from './modules/legacy/impl';
@@ -171,6 +172,7 @@ const routes = async (req: Request): Promise<Response> => {
               return encodeWorkItems(
                 yield* work.claim(
                   agentId, Math.min(16, num(body.count ?? 1)), num(body.lease ?? 3600),
+                  Array.isArray(body.vas) ? body.vas.map(num) : undefined,
                 ),
               );
             case 'submit':
@@ -316,7 +318,11 @@ const routes = async (req: Request): Promise<Response> => {
   }
 
   if (seg[0] === 'api' && seg[1] === 'health') {
-    return json({ ok: true, at: Date.now() / 1000 });
+    // 503 when a check fails, so a monitor or a supervisor can act on it.
+    // Answering 200 whatever the state is what let a broken submit path
+    // serve errors for 75 minutes.
+    const h = healthCheck(dbHandle());
+    return json(h, h.ok ? 200 : 503);
   }
 
   return json({ error: 'not found', path: url.pathname }, 404);
@@ -413,5 +419,22 @@ if (Option.isSome(subjectSummary)) console.log(`  ${subjectSummary.value}`);
 
 supervise();
 
+// LISTEN FIRST. A degraded service that answers /api/health is diagnosable;
+// one that refuses to bind is a silent outage, and blocking boot on a probe
+// is how this file previously deadlocked against its own reaper.
 const server = Bun.serve({ port: PORT, fetch: routes });
 console.log(`decomp service on http://127.0.0.1:${server.port}`);
+
+// Report our own health immediately, and keep reporting it. A failure is
+// announced in the log the moment it appears rather than waiting to be
+// discovered by whoever loses work to it.
+{
+  const say = () => {
+    const h = healthCheck(dbHandle());
+    if (!h.ok) console.error(healthReport(h));
+    return h.ok;
+  };
+  const ok = say();
+  console.log(ok ? healthReport(healthCheck(dbHandle())) : 'SERVING DEGRADED');
+  setInterval(() => void say(), 60_000);
+}

@@ -15,7 +15,7 @@ const KEY = Symbol.for('open-empires.decomp.db');
 
 /** One connection for the process. Parked on globalThis so `bun --watch`
  *  reloading a module does not leak a handle per edit. */
-const handle = (): Database => {
+export const handle = (): Database => {
   const g = globalThis as Record<symbol, unknown>;
   const existing = g[KEY];
   if (existing !== undefined) return existing as Database;

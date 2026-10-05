@@ -581,5 +581,63 @@ WHERE instr(r.text, '::') > 1
   AND r.role != 'referenced-only'
 GROUP BY 1, 2, 3;
 `,
+  },  {
+    id: '005-proof-integrity',
+    sql: `
+-- A fragment match is NOT a proof.
+--
+-- The gate reports where in its emitted object the subject's bytes were
+-- found. At offset 0 the compiler produced those bytes for that function. At
+-- any other offset they merely occur somewhere inside a larger emission,
+-- which says nothing about what the compiler emits AT that address -- the
+-- Python gate guarded against exactly this and the port's caller did not.
+-- One false proof was recorded (0x5EAF30, matched at offset 2 of a 10-byte
+-- emission) before this was caught.
+ALTER TABLE verdicts ADD COLUMN matched_at INTEGER;
+
+-- Rebuilt for two reasons.
+--
+-- 1. matched_at: a verdict only counts at offset 0. NULL is tolerated for the
+--    imported rows, whose gate recorded no offset but whose Python gate
+--    already enforced entry matching.
+-- 2. The PROVER is the compiler BINARY, not the binary plus one flag set.
+--    toolchains.id is sha256(cl.exe) + ':' + flags, and current_config names
+--    exactly one, so joining on it put every /O1 proof outside the
+--    configuration in force -- 8 of them, silently. The flags belong to the
+--    attempt, which is where they already are. So the join is on the compiler
+--    itself, and a different cl.exe still retires everything.
+DROP VIEW proven;
+CREATE VIEW proven AS
+SELECT a.subject_sha, a.va, a.id AS attempt_id, a.flags, a.author,
+       v.gate_run_id, v.decided_at, v.masked, v.compared, f.size
+FROM verdicts v
+JOIN attempts   a  ON a.id = v.attempt_id
+JOIN gate_runs  g  ON g.id = v.gate_run_id
+JOIN functions  f  ON f.subject_sha = a.subject_sha AND f.va = a.va
+JOIN toolchains tg ON tg.id = g.toolchain_id
+JOIN current_config c ON c.only_row = 1
+JOIN toolchains tc ON tc.id = c.toolchain_id
+WHERE v.exact = 1
+  AND (v.matched_at IS NULL OR v.matched_at = 0)
+  AND g.subject_sha = c.subject_sha
+  AND tg.cl_sha256  = tc.cl_sha256;
+
+DROP VIEW superseded;
+CREATE VIEW superseded AS
+SELECT a.subject_sha, a.va, v.gate_run_id, g.toolchain_id,
+       g.subject_sha AS proved_against,
+       CASE WHEN v.matched_at > 0 THEN 'fragment match'
+            ELSE 'different subject or compiler' END AS reason
+FROM verdicts v
+JOIN attempts   a  ON a.id = v.attempt_id
+JOIN gate_runs  g  ON g.id = v.gate_run_id
+JOIN toolchains tg ON tg.id = g.toolchain_id
+JOIN current_config c ON c.only_row = 1
+JOIN toolchains tc ON tc.id = c.toolchain_id
+WHERE v.exact = 1
+  AND (v.matched_at > 0
+       OR g.subject_sha != c.subject_sha
+       OR tg.cl_sha256  != tc.cl_sha256);
+`,
   },
 ];

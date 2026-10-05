@@ -188,10 +188,10 @@ export class MetricsImpl
     const r = (yield* this.dependencies.Db.one(
       `SELECT
          (SELECT COUNT(*) FROM functions f
-            WHERE f.va NOT IN (SELECT va FROM proven)
-              AND f.va NOT IN (SELECT va FROM near_misses)
-              AND f.va NOT IN (SELECT va FROM claims
-                                 WHERE released_at IS NULL AND expires_at > ?)) AS depth,
+            WHERE NOT EXISTS (SELECT 1 FROM proven p WHERE p.va = f.va)
+              AND NOT EXISTS (SELECT 1 FROM near_misses m WHERE m.va = f.va)
+              AND NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.va = f.va
+                            AND cl.released_at IS NULL AND cl.expires_at > ?)) AS depth,
          (SELECT COUNT(*) FROM claims
             WHERE released_at IS NULL AND expires_at > ?)                       AS claimed`,
       [Date.now() / 1000, Date.now() / 1000],

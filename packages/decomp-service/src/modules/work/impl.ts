@@ -31,9 +31,40 @@ export class WorkImpl
     agentId: string,
     count: number,
     leaseSeconds: number,
+    vas?: ReadonlyArray<number>,
   ): EffectGen<ReadonlyArray<WorkItem>, WorkFailure> {
     const db = this.dependencies.Db;
     const t = now();
+
+    // Named addresses bypass the queue's ordering but NOT its rules: an
+    // address already proven, or under someone else's live lease, is still
+    // refused.
+    if (vas !== undefined && vas.length > 0) {
+      const named = yield* db.all(
+        `SELECT f.va AS va, f.size AS size FROM functions f
+         JOIN current_config c ON c.only_row = 1 AND c.subject_sha = f.subject_sha
+         WHERE f.size > 0
+           AND f.va IN (${vas.map(() => '?').join(',')})
+           AND NOT EXISTS (SELECT 1 FROM proven p
+                       WHERE p.subject_sha = f.subject_sha AND p.va = f.va)
+           AND NOT EXISTS (SELECT 1 FROM claims cl
+                       WHERE cl.subject_sha = f.subject_sha AND cl.va = f.va
+                         AND cl.released_at IS NULL AND cl.expires_at > ?
+                         AND cl.agent_id != ?)`,
+        [...vas, t, agentId],
+      );
+      const out: WorkItem[] = [];
+      for (const raw of named) {
+        const r = raw as { va: number; size: number };
+        yield* db.run(
+          `INSERT INTO claims(subject_sha, va, agent_id, claimed_at, expires_at)
+           SELECT c.subject_sha, ?, ?, ?, ? FROM current_config c WHERE c.only_row = 1`,
+          [r.va, agentId, t, t + leaseSeconds],
+        );
+        out.push(yield* this.describe(r.va, r.size));
+      }
+      return out;
+    }
 
     // Unsolved, unclaimed, not already parked as a diagnosed near-miss.
     // Biggest first: a large function is where the remaining bytes are, and
@@ -42,12 +73,24 @@ export class WorkImpl
       `SELECT f.va AS va, f.size AS size
        FROM functions f
        JOIN current_config c ON c.only_row = 1 AND c.subject_sha = f.subject_sha
-       WHERE f.va NOT IN (SELECT va FROM proven WHERE subject_sha = f.subject_sha)
-         AND f.va NOT IN (SELECT va FROM near_misses WHERE subject_sha = f.subject_sha)
-         AND f.va NOT IN (
-           SELECT va FROM claims
-           WHERE subject_sha = f.subject_sha AND released_at IS NULL AND expires_at > ?)
-       ORDER BY f.size DESC
+       -- A zero-extent entry cannot be reconstructed: there are no bytes to
+       -- match. Two exist in the inventory and they are a discovery defect
+       -- rather than work -- the gap sweep starting at one of them is why
+       -- name recovery misses the reference at 0x460E0C.
+       WHERE f.size > 0
+         AND NOT EXISTS (SELECT 1 FROM proven p
+                       WHERE p.subject_sha = f.subject_sha AND p.va = f.va)
+         AND NOT EXISTS (SELECT 1 FROM near_misses m
+                       WHERE m.subject_sha = f.subject_sha AND m.va = f.va)
+         AND NOT EXISTS (SELECT 1 FROM claims cl
+                     WHERE cl.subject_sha = f.subject_sha AND cl.va = f.va
+                       AND cl.released_at IS NULL AND cl.expires_at > ?)
+       -- Smallest first. Ordering by size DESC gave the first caller the
+       -- largest function in the binary (13,791 bytes, 3,901 instructions),
+       -- which is the least likely thing in the queue to be solved. Agents
+       -- succeed by adapting an already-solved sibling, so the queue serves
+       -- the most tractable work and the byte total follows from throughput.
+       ORDER BY f.size ASC
        LIMIT ?`,
       [t, count],
     );
@@ -107,11 +150,44 @@ export class WorkImpl
       [va],
     );
 
+    // Rank the already-proven set by shape. An EXACT row means a solved
+    // function with the same instruction shape, which is usually finished by
+    // changing one offset -- so the agent is handed the answer rather than
+    // the means to find it.
+    const solvedRows = yield* db.all(
+      `SELECT p.va AS va, p.size AS size FROM proven p
+       ORDER BY ABS(p.va - ?) LIMIT ?`,
+      [va, SIBLING_POOL],
+    );
+    const ranked = yield* this.dependencies.Disasm.rankSiblings(
+      img,
+      { va, size },
+      solvedRows.map((r) => {
+        const o = r as { va: number; size: number };
+        return { va: o.va, size: o.size };
+      }),
+    );
+    const top = ranked.slice(0, SIBLINGS_RETURNED);
+    const sources = new Map<number, string>();
+    for (const s of top) {
+      const row = (yield* db.one(
+        `SELECT a.source AS source FROM proven p
+         JOIN attempts a ON a.id = p.attempt_id
+         WHERE p.va = ? LIMIT 1`,
+        [s.va],
+      )) as { source: string } | null;
+      if (row !== null) sources.set(s.va, row.source);
+    }
+
     return {
       va,
       size,
       disassembly: Option.getOrElse(listing, () => ''),
-      siblings: [],
+      siblings: top.map((s) => ({
+        va: s.va,
+        similarity: s.exactShape ? 1 : s.mnemonicSimilarity,
+        source: sources.get(s.va) ?? '',
+      })),
       previousAttempts: prior.map((raw) => {
         const r = raw as Record<string, unknown>;
         return {
@@ -151,44 +227,82 @@ export class WorkImpl
       va, original, source, flags: bucket,
     });
 
-    const run = yield* db.one(
-      `SELECT id FROM gate_runs ORDER BY started_at DESC LIMIT 1`,
+    // The run must carry the toolchain the compile ACTUALLY used. Taking the
+    // newest run regardless of flags recorded every /O1 proof against the
+    // /O2 toolchain -- 8 of them -- which is the prover identity the whole
+    // schema exists to keep honest.
+    const toolchain = yield* gate.toolchain(bucket);
+    yield* db.run(
+      `INSERT INTO toolchains(id, cl_sha256, flags, comp_id, added_at)
+       VALUES (?,?,?,?,?) ON CONFLICT(id) DO NOTHING`,
+      [toolchain.id, toolchain.clSha256, bucket,
+       Option.getOrNull(toolchain.compId), t],
     );
+    const run = (yield* db.one(
+      `SELECT g.id AS id FROM gate_runs g
+       JOIN current_config c ON c.only_row = 1 AND c.subject_sha = g.subject_sha
+       WHERE g.toolchain_id = ? ORDER BY g.started_at DESC LIMIT 1`,
+      [toolchain.id],
+    )) as { id: number } | null;
     const runId =
       run === null
         ? yield* db.insert(
             `INSERT INTO gate_runs(subject_sha, toolchain_id, started_at, attempted, exact)
-             SELECT c.subject_sha, c.toolchain_id, ?, 0, 0 FROM current_config c
+             SELECT c.subject_sha, ?, ?, 0, 0 FROM current_config c
              WHERE c.only_row = 1`,
-            [t],
+            [toolchain.id, t],
           )
-        : Number((run as { id: number }).id);
+        : Number(run.id);
 
-    const attemptId = yield* db.insert(
+    // Resubmitting identical source is normal -- an agent re-runs a candidate
+    // after a service restart, or two sweep variants collapse to the same
+    // text. The ON CONFLICT then inserts nothing and lastInsertRowid is a
+    // STALE rowid from some earlier insert, so the verdict below was written
+    // against the wrong attempt or failed its foreign key outright. An EXACT
+    // verdict was lost that way: no proof recorded, and the claim not
+    // released. So the id is read back rather than assumed.
+    // A match at a non-zero offset says the bytes occur somewhere inside a
+    // larger emission, not that the compiler emits them AT this address. It
+    // is a weaker claim and must never release the claim or enter `proven`.
+    const atEntry =
+      v.exact && Option.getOrElse(v.matchedAt, () => 0) === 0;
+
+    const sourceSha = sha(source);
+    yield* db.run(
       `INSERT INTO attempts(subject_sha, va, source, source_sha, flags, author, created_at)
        SELECT c.subject_sha, ?, ?, ?, ?, ?, ? FROM current_config c WHERE c.only_row = 1
        ON CONFLICT(subject_sha, va, source_sha, flags) DO NOTHING`,
-      [va, source, sha(source), bucket, agentId, t],
+      [va, source, sourceSha, bucket, agentId, t],
     );
+    const attemptRow = (yield* db.one(
+      `SELECT a.id AS id FROM attempts a
+       JOIN current_config c ON c.only_row = 1 AND c.subject_sha = a.subject_sha
+       WHERE a.va = ? AND a.source_sha = ? AND a.flags = ?`,
+      [va, sourceSha, bucket],
+    )) as { id: number } | null;
+    if (attemptRow === null) return yield* Effect.fail(new UnknownFunction({ va }));
+    const attemptId = attemptRow.id;
 
     yield* db.run(
       `INSERT OR REPLACE INTO verdicts(attempt_id, gate_run_id, exact, compiled,
-         emitted_size, masked, compared, first_diff, detail, decided_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+         emitted_size, masked, compared, first_diff, detail, decided_at,
+         matched_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
       [
-        attemptId, runId, v.exact ? 1 : 0, v.compiled ? 1 : 0,
+        attemptId, runId, atEntry ? 1 : 0, v.compiled ? 1 : 0,
         Option.getOrNull(v.emittedSize), v.masked, v.compared,
         Option.getOrNull(v.firstDiff), Option.getOrNull(v.detail), t,
+        Option.getOrNull(v.matchedAt),
       ],
     );
 
-    if (v.exact) {
+    if (atEntry) {
       yield* db.run(`UPDATE claims SET released_at = ? WHERE va = ? AND agent_id = ?`, [t, va, agentId]);
       yield* db.run(`DELETE FROM near_misses WHERE va = ?`, [va]);
     }
 
     return {
-      exact: v.exact,
+      exact: atEntry,
       compiled: v.compiled,
       emittedSize: v.emittedSize,
       masked: Option.some(v.masked),
@@ -313,11 +427,18 @@ export class WorkImpl
     const row = (yield* this.dependencies.Db.one(
       `SELECT COUNT(*) AS n FROM functions f
        JOIN current_config c ON c.only_row = 1 AND c.subject_sha = f.subject_sha
-       WHERE f.va NOT IN (SELECT va FROM proven WHERE subject_sha = f.subject_sha)
-         AND f.va NOT IN (SELECT va FROM near_misses WHERE subject_sha = f.subject_sha)
-         AND f.va NOT IN (
-           SELECT va FROM claims
-           WHERE subject_sha = f.subject_sha AND released_at IS NULL AND expires_at > ?)`,
+       -- A zero-extent entry cannot be reconstructed: there are no bytes to
+       -- match. Two exist in the inventory and they are a discovery defect
+       -- rather than work -- the gap sweep starting at one of them is why
+       -- name recovery misses the reference at 0x460E0C.
+       WHERE f.size > 0
+         AND NOT EXISTS (SELECT 1 FROM proven p
+                       WHERE p.subject_sha = f.subject_sha AND p.va = f.va)
+         AND NOT EXISTS (SELECT 1 FROM near_misses m
+                       WHERE m.subject_sha = f.subject_sha AND m.va = f.va)
+         AND NOT EXISTS (SELECT 1 FROM claims cl
+                     WHERE cl.subject_sha = f.subject_sha AND cl.va = f.va
+                       AND cl.released_at IS NULL AND cl.expires_at > ?)`,
       [now()],
     )) as { n: number } | null;
     return row === null ? 0 : Number(row.n);
