@@ -12,7 +12,9 @@
  * help because the process had not changed -- only its behaviour had. It
  * served errors for 75 minutes while four agents kept submitting work.
  *
- * `--watch` reloads on EDIT. It does not restart on EXIT. This does both:
+ * `--watch` reloads on EDIT. It does not restart on EXIT. This restarts on
+ * exit and on a failing health probe, and deliberately does NOT reload on
+ * edit -- see the comment on the spawn below:
  *
  *   - respawns the child whenever it exits, with backoff, forever
  *   - polls /api/health and restarts a process that is listening but BROKEN,
@@ -69,7 +71,22 @@ let stopping = false;
 const start = () => {
   startedAt = Date.now();
   sick = 0;
-  child = spawn('bun', ['--watch', 'src/main.ts'], {
+  // NOT `--watch`.
+  //
+  // `--watch` restarts the service the moment a source file changes, which
+  // means every edit to any file it imports takes the service down for the
+  // 10-14 seconds a boot takes -- migrations, subject ingest, the first
+  // health report. While this service was being worked on it went down twice
+  // that way, and agents mid-request saw a dead socket. Worse, a file saved
+  // halfway through an edit is a syntax error, so the restart can land on
+  // code that does not boot at all.
+  //
+  // The supervisor already respawns on EXIT, with backoff, and restarts a
+  // child that is listening but failing its health probe. Reloading on edit
+  // adds nothing it does not already do and makes availability depend on
+  // whether someone happens to be typing. A deploy is now a deliberate act:
+  // kill the child and the supervisor brings up the new code.
+  child = spawn('bun', ['src/main.ts'], {
     cwd: ROOT,
     stdio: 'inherit',
     env: { ...process.env, PORT: String(PORT) },
