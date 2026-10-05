@@ -257,6 +257,28 @@ export class DiscoveryImpl
         const b = byteAt(at);
         if (b === undefined || PAD.has(b) || rejected.has(at)) continue;
 
+        // MEASURED AT ONE BOUNDARY ONLY, and the alternative was tried.
+        //
+        // A padding run ending on a 16-byte boundary is usually where a
+        // function starts, but MSVC also emits single 0x90 bytes INSIDE a
+        // function to align a loop target, and one landing on a boundary is
+        // indistinguishable. Such a false boundary truncates the span of the
+        // real function before it, which is why 0x518700 -- opening
+        // `64 a1 00 00 00 00 6a ff`, MSVC's structured-exception frame setup,
+        // which appears nowhere but at an entry -- cannot be measured here.
+        //
+        // Letting a failed span retry against successive boundaries fixes
+        // exactly that case, and was measured against 1,119 proven functions
+        // before being kept: it took the unmeasured share from 2.0% to 0.1%,
+        // and of the 21 it newly measured, 4 were right and 17 OVERRAN into
+        // the next function. Exact went 89.7% to 90.1% while too-long went
+        // 8.3% to 9.8%. Seventeen wrong entries, each costing an agent a
+        // reconstruction of two functions written as one, is not worth four
+        // right ones, so it is not done.
+        //
+        // What would settle these is evidence that a span START is an entry,
+        // independent of layout -- which is what a reference provides and
+        // these addresses by definition lack.
         const extent = yield* disasm.measureExtent(img, at, until);
         if (Option.isNone(extent)) {
           const head = [...img.bytes.subarray(at - img.imageBase, at - img.imageBase + 8)]
