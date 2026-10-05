@@ -141,12 +141,33 @@ export interface SweepOutcome {
   readonly offConfiguration: boolean;
 }
 
+/**
+ * What the best-performing source actually compiled to, beside the subject.
+ *
+ * `firstDiff` alone is a one-bit oracle on a large function: it reports the
+ * first differing byte and stops, so a divergence at offset 52 of 3,942 says
+ * nothing about the other 3,890. These two listings are addressed at the
+ * same VA so they can be read side by side.
+ */
+export interface SweepComparison {
+  readonly flags: string;
+  readonly firstDiff: Option.Option<number>;
+  readonly emittedBytes: string;
+  readonly emittedListing: string;
+  readonly subjectListing: string;
+  /** Offsets the LINKER fills. A difference at one of these is not a
+   *  difference in the reconstruction. */
+  readonly relocatedOffsets: ReadonlyArray<number>;
+}
+
 export interface SweepReport {
   readonly va: number;
   readonly size: number;
   readonly outcomes: ReadonlyArray<SweepOutcome>;
   /** Flag sets that matched at the entry. Empty is the common answer. */
   readonly matched: ReadonlyArray<string>;
+  /** Absent when nothing compiled. */
+  readonly comparison?: SweepComparison;
   /** True when something matched under flags the configuration does not name.
    *  The one field a caller must not ignore. */
   readonly finding: boolean;

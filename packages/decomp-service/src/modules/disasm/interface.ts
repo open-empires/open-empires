@@ -320,6 +320,26 @@ export interface IDisasm {
   ): EffectGen<number, DisasmError>;
 
   /**
+   * Disassemble arbitrary bytes, as if they sat at `baseVa`.
+   *
+   * Every other listing here reads the SUBJECT. This one reads what the
+   * compiler just emitted, which is the only way an agent can see why its
+   * source diverged.
+   *
+   * Without it the feedback at this size is one number. `firstDiff` reports
+   * the first byte that differs and stops, and on a 3,942-byte function the
+   * first length-sensitive byte sat at offset 52 -- so 3,890 bytes were never
+   * examined and the worker had no way to tell a wrong instruction from a
+   * wrong branch displacement. It called the oracle "one-bit" and it was
+   * right: two functions were abandoned for want of this.
+   */
+  listingOfBytes(
+    bytes: Uint8Array,
+    baseVa: number,
+    label: string,
+  ): EffectGen<string, DisasmError>;
+
+  /**
    * Enumerate function entries from the call graph and from pointer tables,
    * and measure each one's extent.
    *

@@ -6,7 +6,8 @@ import { SUBJECT_FLAGS, SUBJECT_FLAGS_O1 } from '../gate/interface';
 import type { SubjectImage } from '../disasm/interface';
 import {
   MAX_SWEEP_FLAG_SETS, NoSubject, NotClaimed, UnknownFunction,
-  type IWork, type SubmitFailure, type SweepOutcome, type SweepReport,
+  type IWork, type SubmitFailure, type SweepComparison, type SweepOutcome,
+  type SweepReport,
   type Verdict, type WorkFailure, type WorkItem,
 } from './interface';
 
@@ -514,11 +515,64 @@ export class WorkImpl
       });
     }
     const matched = outcomes.filter((o) => o.matchedAtEntry).map((o) => o.flags);
+
+    // WHAT THE SOURCE ACTUALLY COMPILED TO, for the candidate that got
+    // furthest.
+    //
+    // Until now a sweep answered with `firstDiff` and nothing else: the
+    // offset of the first byte that differs. On a small function that is
+    // enough to act on. On a large one it is a one-bit oracle -- worker
+    // r38-a's 3,942-byte function diverged at offset 52, the low byte of a
+    // branch displacement near the front, so 3,890 of its bytes were never
+    // examined and there was no way to tell a wrong instruction from a
+    // correctly-written one whose branch had to reach somewhere else. Two
+    // functions were abandoned for want of this, and the gate had the bytes
+    // the whole time: `contribute` returns them and only the wire format
+    // dropped them.
+    //
+    // Only the best candidate is recompiled, not all fourteen: the container
+    // is shared and serialised, and the other thirteen listings would be
+    // answering a question nobody asked.
+    const best = outcomes
+      .filter((o) => o.compiled)
+      .sort(
+        (a, b) =>
+          Option.getOrElse(b.firstDiff, () => -1) -
+          Option.getOrElse(a.firstDiff, () => -1),
+      )[0];
+
+    let comparison: SweepComparison | undefined;
+    if (best !== undefined) {
+      const contribution = yield* gate.contribute({
+        va, original, source, flags: best.flags,
+      });
+      if (Option.isSome(contribution.entry)) {
+        const emitted = contribution.entry.value;
+        const disasm = this.dependencies.Disasm;
+        comparison = {
+          flags: best.flags,
+          firstDiff: best.firstDiff,
+          emittedBytes: [...emitted.bytes]
+            .map((b) => b.toString(16).padStart(2, '0'))
+            .join(''),
+          // Addressed at the subject's own VA, so a branch target in one
+          // listing is the same number as in the other and the two can be
+          // read side by side.
+          emittedListing: yield* disasm.listingOfBytes(emitted.bytes, va, 'EMITTED'),
+          subjectListing: yield* disasm.listingOfBytes(original, va, 'SUBJECT'),
+          // The linker fills these, so a difference at one of them is not a
+          // difference in the reconstruction.
+          relocatedOffsets: [...emitted.relocated].sort((a, b) => a - b),
+        };
+      }
+    }
+
     return {
       va,
       size,
       outcomes,
       matched,
+      comparison,
       finding: outcomes.some((o) => o.matchedAtEntry && o.offConfiguration),
     };
   }

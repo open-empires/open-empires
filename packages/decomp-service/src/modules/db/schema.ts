@@ -1444,4 +1444,22 @@ CREATE TABLE gap_scans (
 CREATE INDEX gap_scans_at ON gap_scans(subject_sha, at DESC);
 `,
   },
+  {
+    id: '016-dump-identity-includes-mtime',
+    sql: `
+-- A capture is identified by name, size AND modification time.
+--
+-- Name and size alone cannot tell two captures apart, because every capture
+-- of the same region is the same size: \`pmemsave 0 0x20000000\` always
+-- writes 512MB. So when a weaker first capture of guest-ram-2.bin was
+-- REPLACED with a stronger one -- 344 cache entries becoming 362 -- the
+-- re-read trigger saw an identical name and an identical size and did
+-- nothing. The service went on reporting the weaker dump's numbers while the
+-- better file sat on disk.
+--
+-- mtime is what distinguishes them, and it costs a stat rather than hashing
+-- half a gigabyte.
+ALTER TABLE import_dumps ADD COLUMN mtime REAL NOT NULL DEFAULT 0;
+`,
+  },
 ];

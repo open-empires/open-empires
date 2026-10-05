@@ -126,8 +126,41 @@ export class GuestMemory {
     // processes that map the image -- and only those are asked the question
     // that actually discriminates. Same answer, a fraction of the work.
     const cheap = input.expect.subarray(0, Math.min(16, input.expect.length));
+
+    // Stage zero, cheaper still: read the candidate's page-directory entry
+    // for the probe address straight out of ONE DataView.
+    //
+    // Constructing a GuestMemory per candidate built 262,144 of them -- two
+    // paging modes times every page-aligned frame -- each with its own
+    // DataView, and that allocation churn, not the arithmetic, is what made
+    // this the most expensive thing in the suite and failed it intermittently
+    // under load. A candidate whose entry is not marked present, or which
+    // names a frame outside the image, cannot possibly map the probe address,
+    // and that is decidable from four bytes.
+    const view = new DataView(
+      input.ram.buffer,
+      input.ram.byteOffset,
+      input.ram.byteLength,
+    );
+    const plausible = (cr3: number): boolean => {
+      // Legacy paging: 4-byte PDE indexed by the top ten bits.
+      const legacyAt = (cr3 & 0xfffff000) + ((input.probeVa >>> 22) << 2);
+      if (legacyAt + 4 <= input.ram.length) {
+        const pde = view.getUint32(legacyAt, true);
+        if ((pde & 1) === 1 && (pde & 0xfffff000) >>> 0 < input.ram.length) return true;
+      }
+      // PAE: 8-byte PDPTE indexed by the top two bits.
+      const paeAt = (cr3 & 0xffffffe0) + ((input.probeVa >>> 30) << 3);
+      if (paeAt + 8 <= input.ram.length) {
+        const lo = view.getUint32(paeAt, true);
+        if ((lo & 1) === 1 && (lo & 0xfffff000) >>> 0 < input.ram.length) return true;
+      }
+      return false;
+    };
+
     const shortlist: number[] = [];
     for (let cr3 = 0; cr3 + 0x1000 <= input.ram.length; cr3 += 0x1000) {
+      if (!plausible(cr3)) continue;
       const rough = GuestMemory.detect({
         ram: input.ram,
         cr3,

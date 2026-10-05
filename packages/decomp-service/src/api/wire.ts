@@ -90,6 +90,25 @@ export const SweepReportWire = Schema.Struct({
     }),
   ),
   matched: Schema.Array(Schema.String),
+  /**
+   * What the best candidate actually compiled to, beside the subject.
+   *
+   * This is the field whose absence made a sweep a one-bit oracle on a large
+   * function. The gate has carried the emitted bytes all along -- only this
+   * wire format dropped them -- so a worker facing a 3,942-byte function was
+   * told the offset of the first differing byte and nothing more. Optional
+   * because nothing is emitted when no flag set compiles.
+   */
+  comparison: Schema.optional(
+    Schema.Struct({
+      flags: Schema.String,
+      firstDiff: Schema.OptionFromNullOr(Schema.Number),
+      emittedBytes: Schema.String,
+      emittedListing: Schema.String,
+      subjectListing: Schema.String,
+      relocatedOffsets: Schema.Array(Schema.Number),
+    }),
+  ),
   finding: Schema.Boolean,
 });
 

@@ -957,16 +957,27 @@ const subjectSummary = await run(
       // So the surface is re-read when the set of dumps on disk differs from
       // the set `import_dumps` says was read. Identity is the name and the
       // size, which notices a new or replaced capture without hashing 512MB.
-      const onDisk = guestRamPaths().map((p) => ({
-        dump: p.split('/').pop() ?? p,
-        bytes: fs.statSync(p).size,
-      }));
+      // Identity is name, size AND modification time. Size alone cannot tell
+      // two captures apart -- every capture of the same region is 512MB -- so
+      // replacing a weak dump with a strong one left name and size identical
+      // and this never fired.
+      const onDisk = guestRamPaths().map((p) => {
+        const st = fs.statSync(p);
+        return {
+          dump: p.split('/').pop() ?? p,
+          bytes: st.size,
+          mtime: st.mtimeMs / 1000,
+        };
+      });
       const readBefore = (yield* db.all(
-        'SELECT dump, bytes FROM import_dumps WHERE subject_sha = ?',
+        'SELECT dump, bytes, mtime FROM import_dumps WHERE subject_sha = ?',
         [recorded.sha256],
-      )) as ReadonlyArray<{ dump: string; bytes: number }>;
-      const key = (rows: ReadonlyArray<{ dump: string; bytes: number }>) =>
-        [...rows].map((r) => `${r.dump}:${r.bytes}`).sort().join('|');
+      )) as ReadonlyArray<{ dump: string; bytes: number; mtime: number }>;
+      const key = (rows: ReadonlyArray<{ dump: string; bytes: number; mtime: number }>) =>
+        [...rows]
+          .map((r) => `${r.dump}:${r.bytes}:${Math.round(r.mtime)}`)
+          .sort()
+          .join('|');
       const dumpsChanged = key(onDisk) !== key(readBefore);
 
       if ((mapped as { n: number }).n > 0 && !dumpsChanged) return Option.none<string>();

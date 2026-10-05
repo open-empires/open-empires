@@ -81,6 +81,31 @@ export class DisasmImpl extends implementing(modules.Disasm) implements IDisasm 
     );
   }
 
+  *listingOfBytes(
+    bytes: Uint8Array,
+    baseVa: number,
+    label: string,
+  ): EffectGen<string, DisasmError> {
+    return yield* this.decoding((d) => {
+      const insns = decodeLinear(d, bytes, baseVa);
+      const covered = insns.reduce((n, i) => n + i.size, 0);
+      const head = `${label}  ${bytes.length} bytes`;
+      const lines = insns.map((i) => {
+        const hex = [...i.bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+        const addr = `0x${i.address.toString(16).padStart(8, '0')}`;
+        const off = `+${(i.address - baseVa).toString().padStart(5)}`;
+        return `  ${off} ${addr} ${hex.padEnd(20)} ${i.mnemonic.padEnd(7)} ${i.opStr}`;
+      });
+      // Said rather than hidden: a listing that stops short of the bytes it
+      // was given has not shown the caller everything it holds.
+      const tail =
+        covered < bytes.length
+          ? [`  ;; ${bytes.length - covered} trailing byte(s) did not decode as instructions`]
+          : [];
+      return [head, ...lines, ...tail].join('\n');
+    });
+  }
+
   *measureExtent(
     subject: SubjectImage,
     va: number,

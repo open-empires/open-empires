@@ -210,11 +210,11 @@ if (missing.length > 0) {
    * its cache only when the game calls through that slot, so one capture
    * answers for the slots its session exercised:
    *
-   *   no-cached-call-site  54 -> 48   six slots the first session never used
-   *   multiple-apis        51 -> 63   twelve more slots caught serving a
+   *   no-cached-call-site  54 -> 46   eight slots the first session never used
+   *   multiple-apis        51 -> 68   seventeen more slots caught serving a
    *                                   SECOND API, which is new knowledge,
    *                                   not noise
-   *   export-exact        150 -> 142  eight slots moved into multiple-apis
+   *   export-exact        150 -> 139  eleven slots moved into multiple-apis
    *                                   for that reason -- a correction, not a
    *                                   loss
    *   not-an-export         0 ->   2  two cached targets are not exports of
@@ -225,34 +225,34 @@ if (missing.length > 0) {
    * derived page-directory root reads the same process as the first.
    */
   test('every slot is answered in exactly one of four ways', () => {
-    // 141 + 64 + 48 + 2 = 255, every slot accounted for exactly once.
+    // 139 + 68 + 46 + 2 = 255, every slot accounted for exactly once.
     expect(imports.resolutions).toEqual({
-      'export-exact': 141,
-      'multiple-apis': 64,
-      'no-cached-call-site': 48,
+      'export-exact': 139,
+      'multiple-apis': 68,
+      'no-cached-call-site': 46,
       'not-an-export': 2,
     });
   });
 
-  test('349 call-site bindings across both dumps, all named', () => {
-    // 297 from the first dump, 52 the second added. Every one is named: a
+  test('367 call-site bindings across both dumps, all named', () => {
+    // 297 from the first dump, 70 the second added. Every one is named: a
     // binding with no API is not recorded.
-    expect(imports.bindings).toBe(349);
-    expect(imports.namedBindings).toBe(349);
+    expect(imports.bindings).toBe(367);
+    expect(imports.namedBindings).toBe(367);
     // The LAST dump's evidence split, not the union's: `evidence` describes
     // how one capture corroborated each binding it offered.
     expect(imports.evidence).toEqual({
-      'call-operand-verified': 263,
-      'record-entry': 81,
+      'call-operand-verified': 279,
+      'record-entry': 83,
       'call-operand-names-another-slot': 0,
     });
   });
 
-  test('125 distinct APIs are named by the dumps alone', () => {
+  test('126 distinct APIs are named by the dumps alone', () => {
     // The dumps' own answer. The service's reported figure is higher because
     // it unions these with the slot names the libraries' relocation tables
     // supply, which this derivation does not read.
-    expect(imports.distinctApis).toBe(125);
+    expect(imports.distinctApis).toBe(126);
   });
 
   test('each SafeDisc module index is verified against one single DLL', () => {
@@ -275,11 +275,11 @@ if (missing.length > 0) {
         [subject.sha256],
       );
     });
-    // 64 now, not 51: the second dump caught thirteen further slots serving a
-    // second API. A slot that serves several is exactly the case an
+    // 68 now, not 51: the second dump caught seventeen further slots serving
+    // a second API. A slot that serves several is exactly the case an
     // API-per-slot model gets wrong, and more captures keep finding more of
     // them -- which is the argument for taking more.
-    expect(perSlot.length).toBe(64);
+    expect(perSlot.length).toBe(68);
 
     // NAME the slots that do not back the claim, rather than failing on a
     // count. `toBeGreaterThan(1)` said only "one row has 1", which is not

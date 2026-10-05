@@ -50,11 +50,22 @@ const required = <A, E>(result: Result.Result<A, E>): Effect.Effect<A, E> =>
  * Map a file rather than read it. The RAM image is 512MB and only a few
  * thousand of its pages are ever touched.
  */
-/** Size on disk, which with the name identifies a capture well enough to
- *  notice a new one without hashing 512MB. */
-const fileSize = (path: string): Effect.Effect<number, SubjectIoError> =>
+/**
+ * Size and modification time, which with the name identify a capture without
+ * hashing half a gigabyte.
+ *
+ * Size alone is not enough and that is not theoretical: every capture of the
+ * same region is 512MB, so replacing a weak capture with a strong one left
+ * the name and size identical and the re-read never fired.
+ */
+const fileStamp = (
+  path: string,
+): Effect.Effect<{ size: number; mtime: number }, SubjectIoError> =>
   Effect.try({
-    try: () => fs.statSync(path).size,
+    try: () => {
+      const st = fs.statSync(path);
+      return { size: st.size, mtime: st.mtimeMs / 1000 };
+    },
     catch: (cause) =>
       new SubjectIoError({
         path,
@@ -544,14 +555,16 @@ export class SubjectImpl
         }
       });
       // Recorded as the pass runs: these rows are both the report and the
-      // trigger. A dump on disk that is not listed here means the surface
-      // has never been read from it.
+      // trigger. A dump on disk that is not listed here, or listed with a
+      // different size or modification time, means the surface has never
+      // been read from THAT capture.
+      const stamp = yield* fileStamp(dumpPath);
       yield* db.run(
-        `INSERT INTO import_dumps(subject_sha, dump, bytes, cr3, loader_base,
+        `INSERT INTO import_dumps(subject_sha, dump, bytes, mtime, cr3, loader_base,
                                   bindings_offered, bindings_added, contradictions, read_at)
-         VALUES (?,?,?,?,?,?,?,?,?)
+         VALUES (?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(subject_sha, dump) DO UPDATE SET
-           bytes = excluded.bytes, cr3 = excluded.cr3,
+           bytes = excluded.bytes, mtime = excluded.mtime, cr3 = excluded.cr3,
            loader_base = excluded.loader_base,
            bindings_offered = excluded.bindings_offered,
            bindings_added = excluded.bindings_added,
@@ -560,7 +573,8 @@ export class SubjectImpl
         [
           subject.sha256,
           account.dump,
-          (yield* fileSize(dumpPath)),
+          stamp.size,
+          stamp.mtime,
           account.cr3,
           account.loaderBase,
           account.bindingsOffered,
