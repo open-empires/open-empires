@@ -295,6 +295,15 @@ const routes = async (req: Request): Promise<Response> => {
             progress: yield* m.progress(24 * 3600, 80),
             queue: yield* m.queue(),
             inventory: yield* m.inventoryHealth(),
+            // The globals surface, from the module that owns it rather than
+            // a second copy of its queries here. The wasm build needs every
+            // global the game reads, so "how many do we know the extent and
+            // meaning of" belongs beside the function count, not behind a
+            // separate call nobody looks at.
+            // `summary()`, never `recorded()`: the full report assembles
+            // every entry, deferral and pointer candidate -- tens of
+            // thousands of rows -- and this is polled every five seconds.
+            globals: yield* (yield* modules.Globals).summary(),
             agents: encodeAgents(yield* reg.list()),
           };
         }),
@@ -709,11 +718,14 @@ const supervise = () => {
         }),
       ),
     );
-    // `slotsNamed` is the LIST of slots it named, not a count.
-    const named = r.slotsNamed.length;
+    // What this run CHANGED. `slotsNamed` is the derivation's whole answer,
+    // which does not shrink as the names are stored, so logging it reported
+    // the same ten slots as newly named on every tick for as long as the
+    // worker had been scheduled.
+    const named = r.slotsNewlyNamed.length;
     if (named > 0) {
       console.log(`[import-names] ${named} slot(s) named from library relocations: ` +
-        r.slotsNamed.map((s) => `0x${s.slot.toString(16).toUpperCase()}=${s.name}`).join(' '));
+        r.slotsNewlyNamed.map((s) => `0x${s.slot.toString(16).toUpperCase()}=${s.name}`).join(' '));
     }
   });
 

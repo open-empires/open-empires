@@ -1215,4 +1215,32 @@ END;
 ALTER TABLE migrations ADD COLUMN sql_sha256 TEXT;
 `,
   },
+  {
+    id: '010-globals-pointer-coverage',
+    sql: `
+-- Pointer coverage as the rebuild measured it.
+--
+-- "How many of the pointers in the data region fall inside a global whose
+-- extent we have settled" is an interval-containment test over every
+-- candidate and every sized global, and it is implemented once, in
+-- globals/inventory.ts, with a deliberate exclusion: a global sized ONLY
+-- from the pointer values is left out, because its extent was inferred from
+-- the very dwords being counted and including it would report 100% while
+-- measuring nothing.
+--
+-- Re-expressing that in SQL so a dashboard could ask cheaply would be a
+-- second implementation of the same rule, and two implementations of one
+-- algorithm drift silently -- the exclusion is exactly the clause someone
+-- would omit. So the rebuild stores what it measured and every reader
+-- queries this.
+CREATE TABLE globals_pointer_coverage (
+  subject_sha  TEXT    NOT NULL REFERENCES subjects(sha256),
+  at           REAL    NOT NULL,
+  target       TEXT    NOT NULL,   -- 'code' | 'data'
+  enumerated   INTEGER NOT NULL,
+  attributed   INTEGER NOT NULL,
+  PRIMARY KEY (subject_sha, target)
+);
+`,
+  },
 ];

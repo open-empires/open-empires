@@ -29,6 +29,7 @@ import {
   type GlobalsReport,
   type Holds,
   type HoldsBasis,
+  type GlobalsSummary,
   type IGlobals,
   type LibrarySymbol,
   type PointerCandidate,
@@ -79,6 +80,25 @@ const DeferralRow = Schema.Struct({
 });
 
 const CountRow = Schema.Struct({ n: Schema.Number });
+
+/** Decoded, not cast: these come straight off SQL and a renamed column should
+ *  fail here rather than read as 0 everywhere it is shown. */
+const GlobalsSummaryRow = Schema.Struct({
+  globals: Schema.Number,
+  refs: Schema.Number,
+  sized: Schema.Number,
+  named: Schema.Number,
+  holds_known: Schema.Number,
+});
+const PointerCoverageRow = Schema.Struct({
+  target: Schema.String,
+  enumerated: Schema.Number,
+  attributed: Schema.Number,
+});
+const EvidenceCountRow = Schema.Struct({
+  evidence: Schema.String,
+  globals: Schema.Number,
+});
 const ReasonRow = Schema.Struct({ reason: Schema.String, n: Schema.Number });
 const CandidateRow = Schema.Struct({
   address: Schema.Number,
@@ -389,7 +409,7 @@ export class GlobalsImpl
       }
     });
 
-    return assemble({
+    const report = assemble({
       subjectSha256: sha,
       dataRegion: region.dataRegion,
       references: references.length,
@@ -402,6 +422,70 @@ export class GlobalsImpl
       librarySymbols: derived.symbols.length,
       libraryRefusalReasons: derived.refusals.map((r) => r.reason),
     });
+
+    // Stored because the containment rule that produces it lives in
+    // inventory.ts and must not be written a second time in SQL for a cheap
+    // reader: the deliberate exclusion of globals sized only from the
+    // pointer values is exactly the clause a re-implementation would drop,
+    // and it is the difference between measuring the gap and reporting 100%.
+    for (const p of report.pointers) {
+      yield* this.dependencies.Db.run(
+        `INSERT INTO globals_pointer_coverage(subject_sha, at, target, enumerated, attributed)
+         VALUES (?,?,?,?,?)
+         ON CONFLICT(subject_sha, target) DO UPDATE SET
+           at = excluded.at, enumerated = excluded.enumerated,
+           attributed = excluded.attributed`,
+        [sha, Date.now() / 1000, p.target, p.enumerated, p.attributed],
+      );
+    }
+    return report;
+  }
+
+  *summary(): EffectGen<GlobalsSummary, GlobalsError> {
+    const db = this.dependencies.Db;
+    const sha = (yield* this.subject()).sha256;
+    const scalars = yield* rows(
+      db,
+      GlobalsSummaryRow,
+      `SELECT
+         (SELECT COUNT(*) FROM globals WHERE subject_sha = ?)                       AS globals,
+         (SELECT COUNT(*) FROM global_references WHERE subject_sha = ?)             AS refs,
+         (SELECT COUNT(*) FROM globals WHERE subject_sha = ? AND size IS NOT NULL)  AS sized,
+         (SELECT COUNT(*) FROM globals WHERE subject_sha = ? AND name IS NOT NULL)  AS named,
+         (SELECT COUNT(*) FROM globals WHERE subject_sha = ? AND holds IS NOT NULL) AS holds_known`,
+      [sha, sha, sha, sha, sha],
+    );
+
+    const coverage = yield* rows(
+      db,
+      PointerCoverageRow,
+      `SELECT target, enumerated, attributed FROM globals_pointer_coverage
+        WHERE subject_sha = ? ORDER BY target`,
+      [sha],
+    );
+
+    const evidence = yield* rows(
+      db,
+      EvidenceCountRow,
+      `SELECT evidence, COUNT(*) AS globals FROM globals
+        WHERE subject_sha = ? GROUP BY evidence ORDER BY globals DESC`,
+      [sha],
+    );
+
+    const s = scalars[0];
+    return {
+      globals: s?.globals ?? 0,
+      references: s?.refs ?? 0,
+      sized: s?.sized ?? 0,
+      named: s?.named ?? 0,
+      holdsKnown: s?.holds_known ?? 0,
+      pointers: coverage.map((c) => ({
+        target: c.target,
+        enumerated: c.enumerated,
+        attributed: c.attributed,
+      })),
+      byEvidence: evidence.map((e) => ({ evidence: e.evidence, globals: e.globals })),
+    };
   }
 
   *recorded(): EffectGen<Option.Option<GlobalsReport>, GlobalsError> {

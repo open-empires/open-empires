@@ -288,6 +288,24 @@ export interface GlobalsReport {
 
 // -------------------------------------------------------------------- module
 
+/** The globals surface as scalars, for anything that only needs the counts. */
+export interface GlobalsSummary {
+  readonly globals: number;
+  readonly references: number;
+  readonly sized: number;
+  readonly named: number;
+  readonly holdsKnown: number;
+  /** Aligned dwords in the data region that hold an address inside the
+   *  executable span, and how many fall inside a global whose extent is
+   *  settled. This is the relocation table the binary does not carry. */
+  readonly pointers: ReadonlyArray<{
+    readonly target: string;
+    readonly enumerated: number;
+    readonly attributed: number;
+  }>;
+  readonly byEvidence: ReadonlyArray<{ readonly evidence: string; readonly globals: number }>;
+}
+
 export interface IGlobals {
   /**
    * Re-derive the whole inventory from the subject's bytes, the proven set
@@ -311,6 +329,18 @@ export interface IGlobals {
   /** What is recorded for the subject in force, without re-deriving it.
    *  Absent when `rebuild` has never run against it. */
   recorded(): EffectGen<Option.Option<GlobalsReport>, GlobalsError>;
+
+  /**
+   * The same surface as `recorded()`, as scalars, by SQL alone.
+   *
+   * `recorded()` assembles the full report: every entry, every deferral and
+   * every pointer candidate -- tens of thousands of rows. The dashboard polls
+   * every five seconds and needs four numbers, so calling it there would
+   * rebuild the whole report twenty times a minute. It also reads zero while
+   * a rebuild is between its DELETE and its INSERT, which makes the figure
+   * flicker to nothing for no reason the reader can see.
+   */
+  summary(): EffectGen<GlobalsSummary, GlobalsError>;
 
   /** One global and every reference to it. Absent when the address carries no
    *  evidence -- ask `deferrals` for whether that is a refusal or a gap. */

@@ -171,6 +171,21 @@ export interface ImportNameReport {
   /** Slots that had no name and now have one, because all their evidence agrees. */
   readonly slotsNamed: ReadonlyArray<{ readonly slot: number; readonly name: string }>;
   /** Referenced slots still unnamed, with what blocks each one. */
+  /**
+   * Slots this run actually wrote a name onto.
+   *
+   * `slotsNamed` is the derivation's full answer -- every slot the libraries
+   * name -- and it is the right input for working out what remains unnamed.
+   * It is the wrong thing to report as work done: the UPDATE only writes
+   * where the name is still NULL, so on every run after the first the answer
+   * is the same list and nothing changes. The worker logged "10 slot(s) named
+   * from library relocations" with identical slots every twenty minutes.
+   */
+  readonly slotsNewlyNamed: ReadonlyArray<{
+    readonly slot: number;
+    readonly name: string;
+  }>;
+
   readonly slotsStillUnnamed: ReadonlyArray<{
     readonly slot: number;
     readonly apis: ReadonlyArray<string>;

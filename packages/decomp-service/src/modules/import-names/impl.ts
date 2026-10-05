@@ -241,8 +241,18 @@ export class ImportNamesImpl
       for (const binding of bindings) {
         const dll = slots.get(binding.slot)?.dll;
         yield* db.run(
+          // DO NOTHING on conflict. Without it this INSERT raised
+          // "UNIQUE constraint failed: import_bindings.subject_sha, slot,
+          // call_site" on every tick after the first, and because it runs
+          // inside a transaction the WHOLE batch rolled back -- so the
+          // derivation recorded nothing, forever, while the worker logged the
+          // same ten slots as freshly named every twenty minutes. An existing
+          // binding is deliberately not overwritten: where this derivation
+          // and the memory dump disagree about a call site, that is a finding,
+          // and `import_binding_agreement` is the view that reports it.
           `INSERT INTO import_bindings(subject_sha, slot, call_site, api, evidence)
-           VALUES (?,?,?,?,?)`,
+           VALUES (?,?,?,?,?)
+           ON CONFLICT(subject_sha, slot, call_site) DO NOTHING`,
           [
             sha,
             binding.slot,
@@ -276,12 +286,21 @@ export class ImportNamesImpl
       .filter((answer) => answer.apis === 1 && answer.cached_rows === 0)
       .map((answer) => ({ slot: answer.slot, name: answer.api }))
       .sort((a, b) => a.slot - b.slot);
+    // What the UPDATE actually changed, not what it was asked to do. The
+    // UPDATE carries `AND name IS NULL`, so a slot already named is a no-op
+    // -- yet `named` is a query over `import_slot_apis` that keeps listing it,
+    // so the worker reported "10 slot(s) named from library relocations" with
+    // the same ten slots on every tick for as long as it had been running.
+    // Nothing was wrong with the derivation; the report was counting its
+    // intent.
+    const newlyNamed: { slot: number; name: string }[] = [];
     yield* db.tx(function* () {
       for (const entry of named) {
-        yield* db.run(
+        const changed = yield* db.run(
           'UPDATE import_slots SET name = ? WHERE subject_sha = ? AND slot = ? AND name IS NULL',
           [entry.name, sha, entry.slot],
         );
+        if (changed > 0) newlyNamed.push(entry);
       }
     });
 
@@ -326,6 +345,7 @@ export class ImportNamesImpl
       slots,
       apisPerSlot,
       named,
+      newlyNamed,
       cached: cachedSitesPerSlot,
     });
   }
@@ -389,6 +409,7 @@ const report = (input: {
     { readonly api: string; readonly apis: number; readonly cached_rows: number }
   >;
   readonly named: ReadonlyArray<{ readonly slot: number; readonly name: string }>;
+  readonly newlyNamed: ReadonlyArray<{ readonly slot: number; readonly name: string }>;
   readonly cached: ReadonlyMap<number, number>;
 }): ImportNameReport => {
   const libraryApis = new Map<number, Set<string>>();
@@ -464,6 +485,7 @@ const report = (input: {
     bindingDisagreements: input.bindingDisagreements,
     slotsReferenced: libraryApis.size,
     slotsNamed: [...input.named].sort((a, b) => a.slot - b.slot),
+    slotsNewlyNamed: [...input.newlyNamed].sort((a, b) => a.slot - b.slot),
     slotsStillUnnamed: stillUnnamed,
     slotsReproduced: reproduced,
     disagreements,

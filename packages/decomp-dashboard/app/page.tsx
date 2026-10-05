@@ -26,6 +26,12 @@ interface Status {
   blocked: Counted[];
   progress: { at: number; proven: number; bytes: number }[];
   queue: { depth: number; claimed: number };
+  globals: {
+    globals: number; references: number; sized: number; named: number;
+    holdsKnown: number;
+    pointers: { target: string; enumerated: number; attributed: number }[];
+    byEvidence: { evidence: string; globals: number }[];
+  };
   inventory: {
     audit: OptionLike<{
       at: number; entries: number; workable: number;
@@ -362,6 +368,54 @@ export default function Page() {
               label={evidenceLabel(e.evidence)}
               value={f(e.functions)}
               prov={`${f(e.proven)} of these have been rebuilt byte-for-byte. ${evidenceExplain(e.evidence)}`}
+            />
+          ))}
+        </div>
+      </Section>
+
+      <Section
+        title="The data the game keeps"
+        explain={
+          <>
+            Code is only half of it. The game also holds about 1.5MB of
+            variables — the player list, the terrain, every unit — and the
+            rebuilt code has to refer to the same ones. The original binary does
+            not say where any of them start or stop: the compiler turned each
+            name into a bare address, and the game is full of bare addresses. So
+            we work backwards from how the code uses them.{' '}
+            <strong>A pointer stored in that data is the hardest part</strong>:
+            the browser build has to resolve each one, and the binary carries no
+            list of where they are, so we rebuild that list too.
+          </>
+        }
+      >
+        <div className="grid">
+          <Card label="variables found" value={f(s.globals.globals)}
+                prov={`distinct addresses the code actually reads or writes, from ${f(s.globals.references)} places in the code that touch one`} />
+          <Card label="we know how big" value={f(s.globals.sized)}
+                prov="their extent is settled — from a library's own symbol table, from the width of every instruction that accesses them, or from the run of pointers they contain. Without a size we cannot tell one variable from the next" />
+          <Card label="we know the original name" value={f(s.globals.named)}
+                prov="read out of the standard C library's symbol tables, which name their own variables. The game's own names were not kept by the 1999 compiler and cannot be recovered" />
+          <Card label="we know what they hold" value={f(s.globals.holdsKnown)}
+                prov="a pointer to code, a pointer to data, or a floating-point number — determined from the instructions that use the value, not guessed from the bytes" />
+        </div>
+        <p className="explain">
+          Pointers stored inside the data, and how many we can place inside a
+          variable whose extent we have settled. The gap is what the browser
+          build still cannot resolve:
+        </p>
+        <div className="grid">
+          {s.globals.pointers.map((p) => (
+            <Card
+              key={p.target}
+              label={p.target === 'code' ? 'pointers to code' : 'pointers to data'}
+              value={`${f(p.attributed)} / ${f(p.enumerated)}`}
+              stale={p.enumerated > 0 && p.attributed / p.enumerated < 0.5}
+              prov={
+                p.target === 'code'
+                  ? "mostly tables of function addresses, which the game uses to call one of several versions of the same operation. These are well covered because the code that builds them names the table"
+                  : "single pointer fields inside larger structures that nothing in the code bounds. Only rebuilding more functions closes this — each new one turns its addresses from a guess into a fact"
+              }
             />
           ))}
         </div>
