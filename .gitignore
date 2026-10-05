@@ -1,0 +1,20 @@
+
+# ---- decompilation work ----
+# Large inputs and build outputs. These are acquired or regenerated, never
+# authored, and total ~7GB: the installed game and discs, the MSVC 6
+# toolchain, the Windows XP VM, and the RAM dump the whole project reads.
+packages/aoe2-in-browser/work/install-plus-discs/
+packages/aoe2-in-browser/work/toolchain/
+packages/aoe2-in-browser/work/vm/
+packages/aoe2-in-browser/work/dump/
+packages/aoe2-in-browser/work/wasm/
+
+# The service database is REGENERATED from the committed reconstructions and
+# artifacts by `bun src/import.ts`. The sources are the thing to version; a
+# binary sqlite file is neither diffable nor mergeable.
+packages/decomp-service/data/
+
+node_modules/
+.next/
+*.tsbuildinfo
+.DS_Store

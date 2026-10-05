@@ -1,0 +1,21 @@
+{
+  "name": "@open-empires/decomp-service",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/main.ts",
+    "start": "bun src/main.ts",
+    "migrate": "bun src/migrate.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "capstone-wasm": "^1.0.3",
+    "effect": "^4.0.0",
+    "effective-modules": "^0.3.1-effect4"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.0",
+    "typescript": "^5.7.0"
+  }
+}

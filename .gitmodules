@@ -7,3 +7,9 @@
 [submodule "packages/open-empires-api-bindings"]
 	path = packages/open-empires-api-bindings
 	url = git@github-ozyman42:open-empires/open-empires-api-bindings.git
+[submodule "packages/open-empires-datasets"]
+	path = packages/open-empires-datasets
+	url = git@github-ozyman42:open-empires/open-empires-datasets.git
+[submodule "packages/openage"]
+	path = packages/openage
+	url = https://github.com/SFTtech/openage

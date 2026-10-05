@@ -1,0 +1,417 @@
+'use client';
+
+/** The decomp service. It owns the database, the compiler and the queue;
+ *  this page is a pure client of it. */
+const SERVICE = process.env.NEXT_PUBLIC_SERVICE ?? 'http://127.0.0.1:8787';
+
+import { useEffect, useState } from 'react';
+
+/* ------------------------------------------------------------------ types */
+
+interface Counted { key: string; n: number }
+interface OptionLike<T> { _tag: 'Some' | 'None'; value?: T }
+
+interface Status {
+  now: number;
+  phase2: {
+    inventory: number; proven: number; near: number; open: number;
+    bytesProven: number; textSpan: number; pctText: number;
+    weak: number; crt: number; reconstructions: number; superseded: number;
+  };
+  gate: OptionLike<{ id: number; at: number; exact: number; bytesExact: number }>;
+  composition: OptionLike<{
+    runId: number; placed: number; placedBytes: number;
+    maskedBytes: number; diffBytes: number; spanBytes: number;
+  }>;
+  blocked: Counted[];
+  progress: { at: number; proven: number; bytes: number }[];
+  queue: { depth: number; claimed: number };
+  imports: {
+    slots: number; byResolution: Counted[]; bindings: number;
+    bindingsVerified: number; distinctApis: number; byDll: Counted[];
+  };
+  symbols: { named: number; classes: number; byConfidence: Counted[] };
+  port: Counted[];
+  agents: {
+    id: string; role: OptionLike<string>; started: number; beats: number;
+    state: 'live' | 'gone' | 'finished'; silentFor: OptionLike<number>;
+    note: OptionLike<string>;
+  }[];
+}
+
+const some = <T,>(o: OptionLike<T> | undefined): T | undefined =>
+  o && o._tag === 'Some' ? o.value : undefined;
+
+const f = (n: number | undefined) =>
+  n == null ? '—' : Math.round(n).toLocaleString();
+
+const ago = (t: number | undefined) => {
+  if (!t) return 'never';
+  const s = Math.max(0, Date.now() / 1000 - t);
+  if (s < 60) return `${Math.round(s)}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${(s / 3600).toFixed(1)}h ago`;
+  return `${(s / 86400).toFixed(1)}d ago`;
+};
+
+const pick = (rows: Counted[], key: string) =>
+  rows.find((r) => r.key === key)?.n ?? 0;
+
+/* ----------------------------------------------------------- presentation */
+
+function Card({
+  label, value, prov, stale,
+}: { label: string; value: string; prov?: string; stale?: boolean }) {
+  return (
+    <div className="card">
+      <div className="lbl">{label}</div>
+      <div className="big">{value}</div>
+      {prov ? <div className={stale ? 'prov stale' : 'prov'}>{prov}</div> : null}
+    </div>
+  );
+}
+
+function Section({
+  title, explain, children,
+}: { title: string; explain: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <section>
+      <h2>{title}</h2>
+      <p className="explain">{explain}</p>
+      {children}
+    </section>
+  );
+}
+
+function Chart({ series }: { series: Status['progress'] }) {
+  const pts = series.filter((p) => p.proven > 0);
+  if (pts.length < 2) {
+    return (
+      <div className="chartwrap">
+        <div className="empty">
+          Not enough history yet. The line fills in as functions are accepted.
+        </div>
+      </div>
+    );
+  }
+  const W = 940, H = 230, P = { t: 12, r: 14, b: 26, l: 60 };
+  const xs = pts.map((p) => p.at);
+  const ys = pts.map((p) => p.proven);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const lo = Math.min(...ys), hi = Math.max(...ys);
+  const y0 = Math.max(0, lo - (hi - lo) * 0.15 - 1);
+  const y1 = hi + (hi - lo) * 0.12 + 1;
+  const X = (t: number) => P.l + ((t - x0) / Math.max(1, x1 - x0)) * (W - P.l - P.r);
+  const Y = (v: number) => H - P.b - ((v - y0) / Math.max(1, y1 - y0)) * (H - P.t - P.b);
+
+  const grid = [0, 1, 2, 3, 4].map((i) => {
+    const v = y0 + ((y1 - y0) * i) / 4;
+    return (
+      <g key={`g${i}`}>
+        <line x1={P.l} x2={W - P.r} y1={Y(v)} y2={Y(v)} stroke="var(--line)" />
+        <text x={P.l - 8} y={Y(v) + 3.5} textAnchor="end" fontSize="9.5" fill="var(--dim)">
+          {f(v)}
+        </text>
+      </g>
+    );
+  });
+  const ticks = [0, 1, 2, 3, 4].map((i) => {
+    const t = x0 + ((x1 - x0) * i) / 4;
+    return (
+      <text key={`t${i}`} x={X(t)} y={H - P.b + 15} textAnchor="middle"
+            fontSize="9.5" fill="var(--dim)">
+        {new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+      </text>
+    );
+  });
+  const d = pts
+    .map((p, i) => `${i === 0 ? 'M' : 'L'}${X(p.at)},${Y(p.proven)}`)
+    .join(' ');
+  const last = pts[pts.length - 1]!;
+  const area = `${d} L${X(last.at)},${H - P.b} L${X(pts[0]!.at)},${H - P.b} Z`;
+
+  return (
+    <div className="chartwrap">
+      <svg viewBox={`0 0 ${W} ${H}`} role="img"
+           aria-label="functions proven byte-exact over time">
+        {grid}
+        {ticks}
+        <path d={area} fill="var(--ok)" opacity="0.08" />
+        <path d={d} fill="none" stroke="var(--ok)" strokeWidth="1.8" strokeLinejoin="round" />
+        <circle cx={X(last.at)} cy={Y(last.proven)} r="3" fill="var(--ok)" />
+      </svg>
+      <div className="legend">
+        <span><i style={{ background: 'var(--ok)' }} />
+          functions proven byte-exact — {f(last.proven)}</span>
+        <span className="mut">
+          derived from each function&apos;s own solved-at timestamp, not sampled
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------- the page */
+
+export default function Page() {
+  const [s, setS] = useState<Status | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        // This page holds no database and computes nothing. Every figure is
+        // a query the service already answered.
+        const r = await fetch(`${SERVICE}/api/status`, { cache: 'no-store' });
+        if (!r.ok) throw new Error(`status ${r.status}`);
+        const j = (await r.json()) as Status;
+        if (alive) { setS(j); setErr(null); }
+      } catch (e) {
+        if (alive) setErr(e instanceof Error ? e.message : String(e));
+      }
+    };
+    void tick();
+    const h = setInterval(() => void tick(), 5000);
+    return () => { alive = false; clearInterval(h); };
+  }, []);
+
+  if (err && !s) return <div className="wrap"><p className="explain">Cannot reach the service — {err}</p></div>;
+  if (!s) return <div className="wrap"><p className="explain">Loading…</p></div>;
+
+  const gate = some(s.gate);
+  const gateStale = gate ? Date.now() / 1000 - gate.at > 1800 : true;
+  const live = s.agents.filter((a) => a.state === 'live').length;
+  const gone = s.agents.filter((a) => a.state === 'gone').length;
+  
+  return (
+    <div className="wrap">
+      <header>
+        <h1>open-empires · decompilation</h1>
+        <span className={live > 0 ? 'pill live' : 'pill'}>
+          {live > 0 ? `${live} agent${live === 1 ? '' : 's'} working` : 'no agents working'}
+        </span>
+        <span className={gateStale ? 'pill stale' : 'pill'}>
+          proof last run {ago(gate?.at)}
+        </span>
+      </header>
+      <p className="sub">
+        {f(s.phase2.inventory)} functions in the game · refreshed{' '}
+        {new Date().toLocaleTimeString()}
+      </p>
+
+      <Section
+        title="What this is"
+        explain={
+          <>
+            Age of Empires II shipped in 1999 as a Windows program — machine code, with
+            the original source long gone. This project is rebuilding that source and
+            making it run in a browser. <strong>The test for &quot;correct&quot; is not
+            that the code looks right: it is that compiling our C++ with the same
+            compiler Microsoft shipped in 1998 produces byte-for-byte the same machine
+            code as the real game.</strong> Everything below is measured against that
+            test.
+          </>
+        }
+      >
+        <Chart series={s.progress} />
+      </Section>
+
+      <Section
+        title="Phase 2 · Recovering the source"
+        explain={
+          <>
+            Each of the game&apos;s {f(s.phase2.inventory)} functions has to be written
+            back out as C++. A function counts only when the compiler reproduces its
+            exact bytes — so these are proofs, not estimates.{' '}
+            <strong>Near-misses</strong> are functions we fully understand but whose
+            compiled output differs by a few bytes.{' '}
+            <strong>Unevidenced spelling</strong> means the bytes match but several
+            different ways of writing the source would produce them, so the exact
+            original wording is a guess among equals.
+          </>
+        }
+      >
+        <div className="grid">
+          <Card label="proven byte-exact" value={f(s.phase2.proven)}
+                prov={`checked ${ago(gate?.at)}${gateStale ? ' · stale' : ''}`}
+                stale={gateStale} />
+          <Card label="of the game covered" value={`${s.phase2.pctText.toFixed(2)}%`}
+                prov={`${f(s.phase2.bytesProven)} of ${f(s.phase2.textSpan)} bytes of code`} />
+          <Card label="near-misses" value={f(s.phase2.near)}
+                prov="understood, but a few bytes differ" />
+          <Card label="still untouched" value={f(s.phase2.open)}
+                prov="no source written yet" />
+          <Card label="written by hand" value={f(s.phase2.reconstructions)}
+                prov={`plus ${f(s.phase2.crt)} identified from Microsoft's own 1998 library`} />
+          <Card label="retired proofs" value={f(s.phase2.superseded)}
+                prov="proved under a compiler or subject no longer in force" />
+          <Card label="weakly verified" value={f(s.phase2.weak)}
+                prov="over a quarter of their bytes are addresses the test cannot check" />
+        </div>
+      </Section>
+
+      {s.blocked.length > 0 && (
+        <Section
+          title="Why the near-misses are stuck"
+          explain={
+            <>
+              In these functions we know exactly what the code does — the logic is
+              right. What differs is how the compiler arranged its output: which CPU
+              register held which value, what order it wrote things in. One wrong
+              choice and the bytes no longer match, even though the program would
+              behave identically. They are grouped by the reason, because a fix for one
+              usually unlocks the rest of its group.
+            </>
+          }
+        >
+          <table>
+            <tbody>
+              <tr><th>reason</th><th className="r">functions</th></tr>
+              {s.blocked.map((b) => (
+                <tr key={b.key}>
+                  <td>{b.key}</td>
+                  <td className="r">{b.n}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Section>
+      )}
+
+      <Section
+        title="Phase 3 · Replacing Windows"
+        explain={
+          <>
+            The game constantly asks Windows to do things — draw to the screen, play a
+            sound, open a file. To run in a browser, every one of those calls needs a
+            browser-native replacement, so first we have to know which Windows function
+            each call actually goes to. The game&apos;s 1999 copy protection deliberately
+            scrambled that list, so we rebuild it from a memory dump of the game
+            running. <strong>The catch: one entry can serve several different Windows
+            functions depending on which part of the game is calling</strong>, so each
+            is identified per call site rather than per entry.
+          </>
+        }
+      >
+        <div className="grid">
+          <Card label="call sites identified" value={f(s.imports.bindings)}
+                prov={`${f(s.imports.bindingsVerified)} independently cross-checked`} />
+          <Card label="distinct Windows functions" value={f(s.imports.distinctApis)}
+                prov="each matched exactly to a real system library entry" />
+          <Card label="entries with one answer" value={f(pick(s.imports.byResolution, 'export-exact'))}
+                prov={`of ${f(s.imports.slots)} total`} />
+          <Card label="entries serving several" value={f(pick(s.imports.byResolution, 'multiple-apis'))}
+                prov="must be resolved per call site" />
+          <Card label="not yet observed"
+                value={f(pick(s.imports.byResolution, 'no-cached-call-site'))}
+                prov="the game never reached these before the memory dump was taken" />
+        </div>
+      </Section>
+
+      <Section
+        title="Original names"
+        explain={
+          <>
+            Compilers throw away the names programmers write, so recovered code starts
+            out as <span className="mut">sub_00448EB0</span> with fields called{' '}
+            <span className="mut">f20</span>. Some names survive anyway: the game passes
+            its own function names as text to internal bookkeeping code, and that text
+            is still in the file. These are the real names its authors used.
+          </>
+        }
+      >
+        <div className="grid">
+          <Card label="functions with a real name" value={f(s.symbols.named)}
+                prov="read out of text the game carries" />
+          <Card label="real class names" value={f(s.symbols.classes)}
+                prov="e.g. diam_map, pnl_lst, scr_game" />
+          {s.symbols.byConfidence.map((c) => (
+            <Card key={c.key} label={c.key.replace(/-/g, ' ')} value={f(c.n)}
+                  prov="how the name was established" />
+          ))}
+        </div>
+      </Section>
+
+      <Section
+        title="Phase 4 · Running in a browser"
+        explain={
+          <>
+            The recovered source targets a 1998 Windows compiler, which a browser cannot
+            use. This step converts it to portable C++ that compiles to WebAssembly.{' '}
+            <strong>Refused</strong> files contain hand-written x86 assembly, which has
+            no browser equivalent and must be rewritten as ordinary code.{' '}
+            <strong>Needs globals</strong> means the function reaches a fixed memory
+            address from the original program, so it only works once the game&apos;s data
+            is loaded into the right place.
+          </>
+        }
+      >
+        <div className="grid">
+          {s.port.map((p) => (
+            <Card key={p.key} label={p.key.replace(/_/g, ' ')} value={f(p.n)} />
+          ))}
+        </div>
+      </Section>
+
+      <Section
+        title="Agents"
+        explain={
+          <>
+            The work is done by AI agents running in parallel. Each one{' '}
+            <strong>registers itself when it starts</strong> and checks in every time it
+            runs the proof — so a row here means an agent really started, not just that
+            one was asked to. If an agent goes quiet for ten minutes we mark it{' '}
+            <span className="state-gone">gone</span>: agents run inside another process,
+            so silence is the only way to tell that one has died.
+          </>
+        }
+      >
+        <div className="grid">
+          <Card label="working now" value={f(live)} prov="checked in within 10 minutes" />
+          <Card label="finished" value={f(s.agents.filter((a) => a.state === 'finished').length)}
+                prov="deregistered cleanly" />
+          <Card label="gone" value={f(gone)} prov="stopped checking in without finishing" />
+        </div>
+        {s.agents.length > 0 && (
+          <table style={{ marginTop: 10 }}>
+            <tbody>
+              <tr>
+                <th>agent</th><th>doing</th><th className="r">check-ins</th>
+                <th>started</th><th>state</th>
+              </tr>
+              {s.agents.slice(0, 20).map((a) => (
+                <tr key={a.id}>
+                  <td>{a.id}</td>
+                  <td className="mut">{some(a.role) ?? '—'}</td>
+                  <td className="r">{a.beats}</td>
+                  <td className="mut">{ago(a.started)}</td>
+                  <td className={`state-${a.state}`}>{a.state}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Section>
+
+      <Section
+        title="Where these numbers come from"
+        explain={
+          <>
+            Everything on this page is a database query. The database holds one row per
+            real thing — per function, per Windows call site, per agent — and the figures
+            are counted from those rows, so a new question is a new query rather than new
+            plumbing. The graph works the same way: each function records when it first
+            passed the proof, so progress over time is read from those timestamps instead
+            of being sampled. <strong>One thing this service deliberately does not do is
+            decide whether a function is correct</strong> — that is settled only by
+            compiling it and comparing bytes, and this page reports that verdict rather
+            than forming its own.
+          </>
+        }
+      >
+        <></>
+      </Section>
+    </div>
+  );
+}

@@ -1,0 +1,96 @@
+/**
+ * The MSVC-to-portable conversion, against what it must and must not do.
+ *
+ * Pure, so this needs no subject, no compiler and no database -- which is why
+ * it is the one part of the phase-4 port that can be held to its rules by a
+ * test rather than by a corpus run.
+ */
+import { expect, test } from 'bun:test';
+import { convert, GLOBALS_BASE, GLOBALS_END } from './convert';
+
+const converted = (source: string) => {
+  const out = convert(source);
+  if (out.state !== 'converted') throw new Error(`refused: ${out.reason}`);
+  return out;
+};
+
+test('calling conventions are stripped', () => {
+  const out = converted('int __stdcall f(int a) { return a; }\n');
+  expect(out.text).toContain('int  f(int a)');
+  expect(out.text).not.toContain('__stdcall');
+});
+
+test('every convention keyword goes, not just the first', () => {
+  const out = converted('void __cdecl a(); void __fastcall b(); void __thiscall c();\n');
+  for (const kw of ['__cdecl', '__fastcall', '__thiscall']) {
+    expect(out.text).not.toContain(kw);
+  }
+});
+
+test('__declspec goes, dllimport included -- a wasm build has no import library', () => {
+  const out = converted('__declspec(dllimport) int f(void);\n');
+  expect(out.text).not.toContain('__declspec');
+  expect(out.text).toContain('int f(void);');
+});
+
+test('#pragma pack is KEPT: these structs mirror the game\'s real layout', () => {
+  const out = converted('#pragma pack(1)\nstruct S { char a; int b; };\n');
+  expect(out.text).toContain('#pragma pack(1)');
+});
+
+test('__asm is refused, never mangled into something that compiles and lies', () => {
+  const out = convert('void f() { __asm { mov eax, 1 } }\n');
+  expect(out.state).toBe('refused');
+  if (out.state === 'refused') expect(out.reason).toBe('hand-written __asm');
+});
+
+test('__asm named in a comment is prose, not hand-written assembly', () => {
+  // A refusal caused by a comment would withhold a file that converts cleanly.
+  const out = convert('// the original used __asm here; this does not.\nint f() { return 1; }\n');
+  expect(out.state).toBe('converted');
+});
+
+test('a literal address is routed through the globals model, with its include', () => {
+  const out = converted('int f() { return *(int *)0x684480; }\n');
+  expect(out.needsGlobals).toBe(true);
+  expect(out.text).toContain('#include "gameimage.h"');
+  expect(out.text).toContain('(int *)GPTR(0x684480)');
+});
+
+test('a literal address only in a comment gets neither the rewrite nor the include', () => {
+  // The Python rewrote on the full text and recorded the state from the
+  // comment-stripped code, so fourteen files carried an include while being
+  // reported as not needing the globals model. One criterion, read off the code.
+  const out = converted('// vptr = (void *)0x63c51c; would fix the shape\nint f() { return 1; }\n');
+  expect(out.needsGlobals).toBe(false);
+  expect(out.text).not.toContain('gameimage.h');
+  expect(out.text).not.toContain('GPTR');
+});
+
+test('a file with no literal address gains no dependency on the globals model', () => {
+  const out = converted('int f(int a) { return a * 2; }\n');
+  expect(out.needsGlobals).toBe(false);
+  expect(out.text).not.toContain('gameimage.h');
+});
+
+test('a literal inside the model but outside the rewrite pattern is reported', () => {
+  // The pattern reaches 0x6xxxxx; the model spans 0x629000..0x7A28A6. Anything
+  // from 0x700000 up would be a wasm dereference of an address that is not
+  // there, so it is named rather than left to be discovered at runtime.
+  const out = converted('int f() { return *(int *)0x792454; }\n');
+  expect(out.needsGlobals).toBe(false);
+  expect(out.literalsOutsideThePattern).toEqual([0x792454]);
+  expect(0x792454).toBeGreaterThanOrEqual(GLOBALS_BASE);
+  expect(0x792454).toBeLessThan(GLOBALS_END);
+});
+
+test('an address outside the model is not reported as stranded', () => {
+  const out = converted('int f() { return *(int *)0x401000; }\n');
+  expect(out.literalsOutsideThePattern).toEqual([]);
+});
+
+test('a rewritten literal is not then counted as stranded', () => {
+  const out = converted('int f() { return *(int *)0x6355a8; }\n');
+  expect(out.needsGlobals).toBe(true);
+  expect(out.literalsOutsideThePattern).toEqual([]);
+});
