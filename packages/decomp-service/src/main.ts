@@ -88,7 +88,13 @@ const json = (body: unknown, status = 200) =>
  *  this service and must surface as a 500 with its detail, never as a
  *  plausible-looking empty result. */
 const statusFor = (tag: string): number =>
-  ({ UnknownAgent: 404, UnknownFunction: 404, NotClaimed: 409, DbError: 500 })[tag] ?? 500;
+  ({
+    UnknownAgent: 404,
+    UnknownFunction: 404,
+    NotClaimed: 409,
+    ParkWithoutReason: 400,
+    DbError: 500,
+  })[tag] ?? 500;
 
 const handle = async (
   program: Effect.Effect<unknown, { readonly _tag: string }, never>,
@@ -215,6 +221,10 @@ const routes = async (req: Request): Promise<Response> => {
                 ),
               );
             case 'park':
+              // Both fields are required. A park is how a function leaves the
+              // queue, and the class is the only part that aggregates into
+              // "what is stopping us" -- the figure that decides what gets
+              // built next.
               yield* work.park(
                 agentId, num(body.va), String(body.blockedClass ?? ''),
                 String(body.eliminated ?? ''),

@@ -35,6 +35,20 @@ import type { SubjectIoError, SubjectParseError } from '../subject/interface';
  * `urllib` raises on a 409 and the body is only visible through `e.read()`,
  * so the reason is also in the message itself.
  */
+/**
+ * A park with no stated blocker.
+ *
+ * Parking is how a function leaves the queue, so the reason is the only thing
+ * that says what to build next. 53 of 111 parked functions carry no class --
+ * 50 of them do record what was eliminated, so the knowledge was not lost,
+ * but "what is blocking us" could not be counted over half the evidence, and
+ * that count is exactly what decides where effort goes.
+ */
+export class ParkWithoutReason extends Schema.TaggedError<ParkWithoutReason>()(
+  'ParkWithoutReason',
+  { va: Schema.Number, missing: Schema.String },
+) {}
+
 export class NotClaimed extends Schema.TaggedError<NotClaimed>()('NotClaimed', {
   va: Schema.Number,
   agentId: Schema.String,
@@ -235,7 +249,7 @@ export interface IWork {
 
   /** Record a diagnosed near-miss and give the lease back. */
   park(agentId: string, va: number, blockedClass: string, eliminated: string):
-    EffectGen<void, DbError | NotClaimed>;
+    EffectGen<void, DbError | NotClaimed | ParkWithoutReason>;
 
   /** True when a live claim was actually given back. False means the caller
    *  did not hold that address, which must not read as success. */

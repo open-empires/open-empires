@@ -31,6 +31,31 @@ const TOOLCHAIN_ROOT = path.resolve(
 );
 const VC98 = path.join(TOOLCHAIN_ROOT, 'vc98');
 const CL_EXE = path.join(VC98, 'VC98/Bin/CL.EXE');
+
+/**
+ * Every binary that decides what the compiler emits.
+ *
+ * The toolchain's identity used to be the sha256 of CL.EXE alone, and CL.EXE
+ * is a 64KB DRIVER that Service Pack 3 never touched: it still reports
+ * version 12.00.8168 on an install whose code generator is 12.00.8447. The
+ * files that decide the output are the front ends and the back end --
+ * C1.DLL and C1XX.DLL at 12.00.8472, C2.DLL at 12.00.8447 -- and none of them
+ * was in the hash.
+ *
+ * That matters now rather than in principle. The subject's own Rich header
+ * says 169 of its objects were produced by build 8168 and 306 by 8447, so a
+ * second compiler has to be installed beside this one. Swapping C2.DLL would
+ * have left `cl_sha256` byte-for-byte identical, the toolchain row would have
+ * been reused by its primary key, and every proof taken under one code
+ * generator would silently have been attributed to the other.
+ */
+const TOOLCHAIN_BINARIES = [
+  'VC98/Bin/CL.EXE',
+  'VC98/Bin/C1.DLL',
+  'VC98/Bin/C1XX.DLL',
+  'VC98/Bin/C2.DLL',
+  'VC98/Bin/LINK.EXE',
+].map((rel) => path.join(VC98, rel));
 /** Bind-mounted into the container at /work: how a source gets in and an
  *  object gets out. */
 const EXCHANGE = path.join(TOOLCHAIN_ROOT, 'ccwork');
@@ -308,13 +333,26 @@ export class GateImpl extends implementing(modules.Gate) implements IGate {
   }
 
   *toolchain(flags: string): EffectGen<Toolchain, GateUnavailable> {
+    // Hashed over the WHOLE set, in a fixed order, each file's bytes preceded
+    // by its name so that a rename cannot produce the same digest as a
+    // reorder. A missing file fails loudly: an identity computed over
+    // whatever happened to be present would differ from one install to the
+    // next for reasons that have nothing to do with the compiler.
     const clSha256 = yield* Effect.tryPromise({
-      try: async () =>
-        new Bun.CryptoHasher('sha256').update(await Bun.file(CL_EXE).bytes()).digest('hex'),
+      try: async () => {
+        const hasher = new Bun.CryptoHasher('sha256');
+        for (const file of TOOLCHAIN_BINARIES) {
+          hasher.update(`${path.basename(file)}\n`);
+          hasher.update(await Bun.file(file).bytes());
+        }
+        return hasher.digest('hex');
+      },
       catch: (cause) =>
         new GateUnavailable({
           stage: 'toolchain',
-          reason: `cannot hash ${CL_EXE}: ${reason(cause)}`,
+          reason:
+            `cannot hash the toolchain binaries under ${VC98} ` +
+            `(${TOOLCHAIN_BINARIES.map((f) => path.basename(f)).join(', ')}): ${reason(cause)}`,
         }),
     });
     const id = `${clSha256}:${flags}`;

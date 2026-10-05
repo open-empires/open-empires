@@ -24,7 +24,31 @@
  * retracts, and that is expressed by the superseded view, not by UPDATE.
  */
 
-export const MIGRATIONS: ReadonlyArray<{ id: string; sql: string }> = [
+/**
+ * One schema change.
+ *
+ * `verify`, when present, is a query run INSIDE the migration's own
+ * transaction after its `sql`. If it does not return what `verifyExpects`
+ * says, the transaction rolls back and the migration is not recorded.
+ *
+ * It exists because "recorded as applied" and "actually did something" turned
+ * out to be different claims. Migration 018 updated a parent key that three
+ * tables reference while PRAGMA foreign_keys was ON: SQLite silently changed
+ * nothing AND raised nothing, so the migration committed, was recorded, and
+ * its effect was entirely absent. Nothing could have noticed -- the text
+ * matched its stored hash, so the drift check passed too.
+ */
+export interface Migration {
+  readonly id: string;
+  readonly sql: string;
+  /** A query whose result proves the change landed. */
+  readonly verify?: string;
+  /** `nonzero` requires the first column of the first row to be non-zero;
+   *  `zero` requires it to be zero. */
+  readonly verifyExpects?: 'nonzero' | 'zero';
+}
+
+export const MIGRATIONS: ReadonlyArray<Migration> = [
   {
     id: '001-core',
     sql: `
@@ -1485,5 +1509,96 @@ ALTER TABLE import_dumps ADD COLUMN mtime REAL NOT NULL DEFAULT 0;
 ALTER TABLE agents ADD COLUMN doing TEXT;
 ALTER TABLE agents ADD COLUMN doing_at REAL;
 `,
+  },
+  {
+    id: '018-toolchain-identity-over-all-binaries',
+    sql: `
+-- Carry the existing toolchain rows onto the new identity.
+--
+-- A toolchain was identified by the sha256 of CL.EXE alone. CL.EXE is a 64KB
+-- DRIVER that Service Pack 3 never touched: it still reports version
+-- 12.00.8168 on this install, whose code generator C2.DLL is 12.00.8447 and
+-- whose front ends C1.DLL/C1XX.DLL are 12.00.8472. None of the files that
+-- decide what gets emitted was in the hash.
+--
+-- This stops being academic now. The subject's own Rich header says 169 of
+-- its objects were produced by build 8168 and 306 by 8447, so a second
+-- compiler has to stand beside this one. Swapping C2.DLL would have left
+-- cl_sha256 byte-for-byte identical, the toolchain row would have been reused
+-- by its primary key, and proofs taken under one code generator would have
+-- been silently attributed to the other.
+--
+-- The identity now covers CL.EXE, C1.DLL, C1XX.DLL, C2.DLL and LINK.EXE.
+-- THE BINARIES HAVE NOT CHANGED, only how they are named, so the 3,356
+-- existing proofs are still proofs and must not be retired: \`proven\` joins
+-- on cl_sha256, and leaving the old value would have retracted every one of
+-- them for a reason that has nothing to do with the evidence.
+UPDATE toolchains
+   SET id = '91ea199691b0f7d91a228e88c42e54d96132af25d29da22912b40c574f49f01c:' || flags,
+       cl_sha256 = '91ea199691b0f7d91a228e88c42e54d96132af25d29da22912b40c574f49f01c'
+ WHERE cl_sha256 = '5e712379f6f2dc979bdc09573a9609a72225288ec6da232b83e5962800cb5ff4';
+
+UPDATE current_config
+   SET toolchain_id =
+       '91ea199691b0f7d91a228e88c42e54d96132af25d29da22912b40c574f49f01c:'
+       || substr(toolchain_id, instr(toolchain_id, ':') + 1)
+ WHERE toolchain_id LIKE
+       '5e712379f6f2dc979bdc09573a9609a72225288ec6da232b83e5962800cb5ff4:%';
+
+UPDATE gate_runs
+   SET toolchain_id =
+       '91ea199691b0f7d91a228e88c42e54d96132af25d29da22912b40c574f49f01c:'
+       || substr(toolchain_id, instr(toolchain_id, ':') + 1)
+ WHERE toolchain_id LIKE
+       '5e712379f6f2dc979bdc09573a9609a72225288ec6da232b83e5962800cb5ff4:%';
+`,
+  },
+  {
+    id: '019-toolchain-identity-fk-safe',
+    sql: `
+-- Migration 018 was recorded as applied and did nothing. This does the same
+-- work in an order foreign keys permit.
+--
+-- 018 updated \`toolchains.id\` in place. Three tables reference it --
+-- current_config, gate_runs, composition_runs -- and the connection runs with
+-- PRAGMA foreign_keys = ON. Under that, the UPDATE to the referenced parent
+-- key silently changed NOTHING and raised nothing, so the migration committed
+-- and was recorded while its effect was entirely absent. Reproduced in
+-- isolation before writing this.
+--
+-- The FK-safe order is: create the new parent rows, repoint every child at
+-- them, then remove the old parents. At no point does a child reference a row
+-- that does not exist.
+INSERT OR IGNORE INTO toolchains(id, cl_sha256, flags, comp_id, added_at)
+SELECT '91ea199691b0f7d91a228e88c42e54d96132af25d29da22912b40c574f49f01c:' || flags,
+       '91ea199691b0f7d91a228e88c42e54d96132af25d29da22912b40c574f49f01c',
+       flags, comp_id, added_at
+  FROM toolchains
+ WHERE cl_sha256 = '5e712379f6f2dc979bdc09573a9609a72225288ec6da232b83e5962800cb5ff4';
+
+UPDATE current_config
+   SET toolchain_id = '91ea199691b0f7d91a228e88c42e54d96132af25d29da22912b40c574f49f01c:'
+       || substr(toolchain_id, instr(toolchain_id, ':') + 1)
+ WHERE toolchain_id LIKE '5e712379f6f2dc979bdc09573a9609a72225288ec6da232b83e5962800cb5ff4:%';
+
+UPDATE gate_runs
+   SET toolchain_id = '91ea199691b0f7d91a228e88c42e54d96132af25d29da22912b40c574f49f01c:'
+       || substr(toolchain_id, instr(toolchain_id, ':') + 1)
+ WHERE toolchain_id LIKE '5e712379f6f2dc979bdc09573a9609a72225288ec6da232b83e5962800cb5ff4:%';
+
+UPDATE composition_runs
+   SET toolchain_id = '91ea199691b0f7d91a228e88c42e54d96132af25d29da22912b40c574f49f01c:'
+       || substr(toolchain_id, instr(toolchain_id, ':') + 1)
+ WHERE toolchain_id LIKE '5e712379f6f2dc979bdc09573a9609a72225288ec6da232b83e5962800cb5ff4:%';
+
+DELETE FROM toolchains
+ WHERE cl_sha256 = '5e712379f6f2dc979bdc09573a9609a72225288ec6da232b83e5962800cb5ff4';
+`,
+    // Checked INSIDE the migration's own transaction. 018 proved that
+    // "recorded as applied" and "actually did something" are different
+    // claims, and only this one is worth anything.
+    verify: `SELECT COUNT(*) AS ok FROM toolchains
+              WHERE cl_sha256 = '91ea199691b0f7d91a228e88c42e54d96132af25d29da22912b40c574f49f01c'`,
+    verifyExpects: 'nonzero',
   },
 ];

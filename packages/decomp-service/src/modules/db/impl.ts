@@ -203,6 +203,24 @@ export class DbImpl extends implementing(modules.Db) implements IDb {
           db.exec('BEGIN');
           try {
             db.exec(m.sql);
+            // Proof that the change landed, checked before it is recorded.
+            // A migration can run without error and without effect: 018
+            // updated a parent key three tables reference under
+            // foreign_keys=ON, and SQLite changed nothing and raised nothing.
+            if (m.verify !== undefined) {
+              const row = db.query(m.verify).get() as Record<string, unknown> | null;
+              const first = row === null ? undefined : Object.values(row)[0];
+              const value = Number(first ?? 0);
+              const wanted = m.verifyExpects ?? 'nonzero';
+              const ok = wanted === 'nonzero' ? value !== 0 : value === 0;
+              if (!ok) {
+                throw new Error(
+                  `migration ${m.id} ran without error but its verify query ` +
+                    `returned ${String(first)}, which is not ${wanted}; ` +
+                    'the change did not land, so it is not being recorded',
+                );
+              }
+            }
             // 009 adds the column in its own body, so by the time its row is
             // written the column exists -- hence the hash is read back from
             // the schema rather than from the flag computed above.

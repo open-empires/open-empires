@@ -6,6 +6,7 @@ import { SUBJECT_FLAGS, SUBJECT_FLAGS_O1 } from '../gate/interface';
 import type { SubjectImage } from '../disasm/interface';
 import {
   MAX_SWEEP_FLAG_SETS, NoSubject, NotClaimed, UnknownFunction,
+  ParkWithoutReason,
   type IWork, type SubmitFailure, type SweepComparison, type SweepOutcome,
   type SweepReport,
   type Verdict, type WorkFailure, type WorkItem,
@@ -664,10 +665,24 @@ export class WorkImpl
     va: number,
     blockedClass: string,
     eliminated: string,
-  ): EffectGen<void, DbError | NotClaimed> {
+  ): EffectGen<void, DbError | NotClaimed | ParkWithoutReason> {
     const db = this.dependencies.Db;
     const t = now();
     yield* this.touch(agentId);
+    // A park with no stated blocker is refused. The class is the only thing
+    // that aggregates: it is what answers "what is stopping us", and that
+    // answer is what decides what to build next. Half the parked set carries
+    // none, so the question could only ever be asked of the other half.
+    if (blockedClass.trim() === '') {
+      return yield* Effect.fail(
+        new ParkWithoutReason({ va, missing: 'blockedClass' }),
+      );
+    }
+    if (eliminated.trim() === '') {
+      return yield* Effect.fail(
+        new ParkWithoutReason({ va, missing: 'eliminated' }),
+      );
+    }
     const held = yield* db.one(
       `SELECT 1 FROM claims WHERE va = ? AND agent_id = ? AND released_at IS NULL`,
       [va, agentId],
