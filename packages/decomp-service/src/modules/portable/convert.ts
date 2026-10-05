@@ -72,6 +72,76 @@ export const GLOBALS_END = GLOBALS_BASE + 1554534;
 
 const GLOBALS_INCLUDE = '#include "gameimage.h"\n';
 
+/**
+ * What the GATE supplies to every compile, reproduced here.
+ *
+ * The verification compiles each reconstruction with `#include <string.h>`
+ * prepended, so a source may use `strcpy` or `memset` without declaring them
+ * and still be proved byte-exact. The portable rendering did not carry it, so
+ * 123 of 3,322 files -- `strcpy` in 59, `memset` in 23, `memcpy` in 14 --
+ * did not compile at all. Nobody knew, because the tree had never been
+ * compiled.
+ *
+ * A rendering of a verified source has to carry the environment the
+ * verification supplied, or it is a rendering of something that was never
+ * proved.
+ */
+const RUNTIME_INCLUDE = '#include <string.h>\n';
+
+/**
+ * `0x4e-4` is ONE preprocessing token, and an invalid one.
+ *
+ * A pp-number continues through `e-`, so a hex literal ending in e or E
+ * followed directly by `+` or `-` swallows the sign as if it were an
+ * exponent. MSVC 6 accepts it; every standard-conforming compiler rejects it,
+ * and `char p[0x4e-4];` appears verbatim in proved sources. Spacing the
+ * operator changes no value and no token but that one.
+ */
+const HEX_EXPONENT_TRAP = /\b(0[xX][0-9a-fA-F]*[eE])([+-])/g;
+
+/**
+ * The header every converted file includes, emitted from the SAME constants
+ * the rewrite uses.
+ *
+ * Nothing produced this. 3,322 files were written referring to a header no
+ * code emitted, so the browser build could not compile at all -- and the one
+ * check that would have caught it, actually compiling the tree, had never
+ * been run.
+ *
+ * It lives here rather than with the globals inventory because it has to
+ * agree with the rewrite BY CONSTRUCTION. `GPTR` undoes exactly what
+ * `ADDRESS_CAST` did, against the same base; if the two were declared apart,
+ * a change to one would silently relocate every global the other produced.
+ * That is the whole class of fault that put 61 addresses outside the pattern.
+ */
+export const GAMEIMAGE_HEADER = `/* GENERATED -- do not edit.
+ *
+ * The game addressed its variables absolutely: a 1999 MSVC build hard-codes
+ * 0x684480 and dereferences it. There is no such address in WebAssembly, so
+ * every one is translated at the point of use into an offset inside a single
+ * loaded block holding the game's data exactly as the original image laid it
+ * out. Nothing in the data itself is rewritten, which is what makes the
+ * translation checkable: the block is the original bytes.
+ */
+#ifndef OE_GAMEIMAGE_H
+#define OE_GAMEIMAGE_H
+
+/* First address the model maps -- the start of the game's data region. */
+#define GAME_DATA_BASE 0x${GLOBALS_BASE.toString(16)}u
+/* One past the last. */
+#define GAME_DATA_END  0x${GLOBALS_END.toString(16)}u
+#define GAME_DATA_SIZE (GAME_DATA_END - GAME_DATA_BASE)
+
+/* The loaded block. ${GLOBALS_END - GLOBALS_BASE} bytes, read from the image the
+ * game ran with, placed by the host before any reconstructed code runs. */
+extern unsigned char *g_gamedata;
+
+/* An original address becomes a pointer into that block. */
+#define GPTR(a) ((void *)(g_gamedata + ((unsigned)(a) - GAME_DATA_BASE)))
+
+#endif /* OE_GAMEIMAGE_H */
+`;
+
 export const PORT_HEADER = (va: number): string =>
   `// GENERATED from the reconstruction proved for sub_${va
     .toString(16)
@@ -142,13 +212,15 @@ export const convert = (source: string): Conversion => {
     ? stripped.replace(ADDRESS_CAST, (whole, cast: string, addr: string) =>
         inModel(Number(addr)) ? `(${cast})GPTR(${addr})` : whole)
     : stripped;
-  const text = needsGlobals ? GLOBALS_INCLUDE + rewritten : rewritten;
+  const spaced = rewritten.replace(HEX_EXPONENT_TRAP, '$1 $2 ');
+  const text =
+    RUNTIME_INCLUDE + (needsGlobals ? GLOBALS_INCLUDE + spaced : spaced);
 
   // Measured on the OUTPUT's code, so what is reported is what is actually
   // left as a bare literal to be dereferenced -- not what the input happened
   // to contain, and not a number written in a comment.
   const stranded: number[] = [];
-  for (const match of code(rewritten).matchAll(ANY_ADDRESS_CAST)) {
+  for (const match of code(spaced).matchAll(ANY_ADDRESS_CAST)) {
     const value = Number(match[1]);
     if (value >= GLOBALS_BASE && value < GLOBALS_END) stranded.push(value);
   }

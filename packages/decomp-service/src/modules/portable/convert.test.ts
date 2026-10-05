@@ -112,3 +112,27 @@ test('a rewritten literal is not then counted as stranded', () => {
   expect(out.needsGlobals).toBe(true);
   expect(out.literalsOutsideThePattern).toEqual([]);
 });
+
+test('the rendering carries the include the gate compiles with', () => {
+  // A source may use strcpy without declaring it and still be proved, because
+  // the gate prepends <string.h> to every compile. 123 of 3,322 rendered files
+  // did not compile for want of it -- which nobody knew, because the tree had
+  // never been compiled.
+  const out = converted('void f(char *d, const char *s) { strcpy(d, s); }\n');
+  expect(out.text).toContain('#include <string.h>');
+});
+
+test('a hex literal ending in e, followed by a sign, is spaced', () => {
+  // `0x4e-4` is ONE preprocessing token and an invalid one: a pp-number
+  // continues through `e-`, so the sign is swallowed as an exponent. MSVC 6
+  // accepts it and standard compilers reject it, and it appears verbatim in
+  // proved sources.
+  const out = converted('void f() { char p[0x4e-4]; (void)p; }\n');
+  expect(out.text).toContain('0x4e - 4');
+  expect(out.text).not.toContain('0x4e-4');
+});
+
+test('a hex literal not ending in e is left alone', () => {
+  const out = converted('void f() { char p[0x4f-4]; (void)p; }\n');
+  expect(out.text).toContain('0x4f-4');
+});

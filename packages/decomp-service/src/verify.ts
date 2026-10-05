@@ -6,6 +6,8 @@
  *     bun src/verify.ts reloc           classify every relocation field
  *     bun src/verify.ts port [dir]      generate the portable tree
  *     bun src/verify.ts imports         name import slots from the libraries
+ *     bun src/verify.ts portable-compiles
+ *                                       compile every rendered file for wasm32
  *
  * These are not HTTP routes. Each one recompiles every reconstruction in force
  * -- thousands of calls into one serialised compiler -- so a request that
@@ -18,6 +20,9 @@
  * claims: a non-zero composition diff, or a dangling relocation. A run that
  * exited 0 because it merely completed would be worthless.
  */
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { Effect, Layer, Option, pipe } from 'effect';
 import { modules } from './modules';
 import { ComposeImpl } from './modules/compose/impl';
@@ -162,9 +167,86 @@ const program = Effect.gen(function* () {
     }
     if (Option.isSome(r.writtenTo)) {
       console.log(`\n  wrote ${r.filesWritten} files to ${r.writtenTo.value}`);
-      console.log('  gameimage.h is NOT written here: it is the globals model\'s output.');
+      console.log('  plus gameimage.h, from the same constants the rewrite used.');
     } else {
       console.log('\n  recorded only; pass a directory to write the tree.');
+    }
+  }
+
+  // DOES THE RENDERED TREE COMPILE AT ALL.
+  //
+  // It had never been asked. 3,322 files were being generated and the only
+  // thing checked about them was that the conversion did not refuse -- so 167
+  // of them did not compile, for two reasons nothing else could have found:
+  // the rendering did not carry the `string.h` the gate prepends to every
+  // verification compile, and `0x4e-4` is a single invalid preprocessing
+  // token because a pp-number continues through `e-`, which MSVC 6 accepts
+  // and conforming compilers reject.
+  //
+  // Checked against the stubs in platform/ rather than a real sysroot, so it
+  // needs nothing but clang and therefore cannot quietly stop running. Those
+  // stubs are also the list of what a real WebAssembly build must provide.
+  if (wants('portable-compiles')) {
+    const dir = Option.getOrElse(portInto, () =>
+      path.join(os.tmpdir(), 'oe-portable-check'),
+    );
+    if (Option.isNone(portInto)) {
+      yield* (yield* modules.Portable).generate(Option.some(dir));
+    }
+    const stubs = path.join(import.meta.dir, '../platform');
+    const sources = fs.readdirSync(dir).filter((f) => f.endsWith('.cpp'));
+    const broken: Array<{ file: string; error: string }> = [];
+    const batch = 8;
+    for (let i = 0; i < sources.length; i += batch) {
+      const slice = sources.slice(i, i + batch);
+      const results = yield* Effect.promise(() =>
+        Promise.all(
+          slice.map(async (file) => {
+            const proc = Bun.spawn(
+              [
+                'clang', '--target=wasm32', '-std=c++17', '-fno-exceptions',
+                '-fsyntax-only', '-I', dir, '-I', stubs, path.join(dir, file),
+              ],
+              { stdout: 'pipe', stderr: 'pipe' },
+            );
+            const [code, err] = await Promise.all([
+              proc.exited,
+              new Response(proc.stderr).text(),
+            ]);
+            return { file, code, err };
+          }),
+        ),
+      );
+      for (const r of results) {
+        if (r.code !== 0) {
+          const first = r.err.split('\n').find((l) => l.includes('error:')) ?? 'failed';
+          broken.push({ file: r.file, error: first.replace(/^.*error: /, '') });
+        }
+      }
+    }
+    console.log(rule('portable tree -- does it compile for WebAssembly'));
+    console.log(row('files', sources.length));
+    console.log(row('compile', sources.length - broken.length));
+    console.log(row('fail', broken.length));
+    const byError = new Map<string, number>();
+    for (const f of broken) {
+      const key = f.error.replace(/'[^']*'/g, 'X');
+      byError.set(key, (byError.get(key) ?? 0) + 1);
+    }
+    for (const [error, n] of [...byError].sort((a, b) => b[1] - a[1]).slice(0, 10)) {
+      console.log(`    ${String(n).padStart(8)}  ${error}`);
+    }
+    for (const f of broken.slice(0, 10)) console.log(`      ${f.file}: ${f.error}`);
+    if (broken.length > 0) {
+      console.log(
+        '\n  a rendered file that does not compile is a function that cannot ' +
+          'reach the browser build.',
+      );
+      // The OUTER counter, which decides the exit status and the closing
+      // line. A local array shadowed it, so this audit printed 20 failures
+      // and then "every audit answered what the project claims" and exited 0
+      // -- a check that reports its own success is worse than no check.
+      failures += 1;
     }
   }
 

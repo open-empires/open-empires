@@ -7,7 +7,7 @@ import type { DbError, IDb } from '../db/interface';
 import { reconstructionsInForce } from '../db/reconstructions';
 import { rows } from '../db/rows';
 import { NoCurrentSubject } from '../subject/interface';
-import { convert, PORT_HEADER } from './convert';
+import { convert, GAMEIMAGE_HEADER, PORT_HEADER } from './convert';
 import {
   PortWriteError,
   type IPortable,
@@ -98,6 +98,12 @@ export class PortableImpl
       yield* Effect.try({
         try: () => {
           fs.mkdirSync(dir, { recursive: true });
+          // The header every converted file includes, written WITH the tree.
+          // It was referenced by 3,322 files and emitted by nothing, so the
+          // tree could not compile at all -- and nothing noticed, because
+          // compiling it had never been tried. Written from the same
+          // constants the rewrite used, so the two cannot drift.
+          fs.writeFileSync(path.join(dir, 'gameimage.h'), GAMEIMAGE_HEADER);
           // Stale generated files are removed, because a file left behind from
           // a source that no longer exists answers a question wrongly where a
           // missing one asks it.
