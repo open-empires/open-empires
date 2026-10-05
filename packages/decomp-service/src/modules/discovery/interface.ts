@@ -69,7 +69,28 @@ export type Evidence =
    * entries look like. A first-byte whitelist was tried here before and
    * rejected 14% of the functions we had already proven.
    */
-  | 'gap-residue';
+  | 'gap-residue'
+  /**
+   * PADDING-ALIGNED -- a run of 0x90/0xCC ending at a 16-byte-aligned
+   * address, with real content after it.
+   *
+   * MSVC aligns each function and fills the space before it, so the end of a
+   * padding run at an alignment boundary is where the next function begins.
+   * Measured against the 3,356 functions already proven byte-exact: 89.5% of
+   * them are preceded by exactly this, and across the whole executable span
+   * 6,182 of 7,630 such boundaries (81%) land on an address the inventory
+   * already holds. The remaining 1,448 are candidate entries no reference
+   * reaches.
+   *
+   * The 16-byte test is what makes it usable. Single 0x90 bytes are common
+   * INSIDE functions -- MSVC pads to align a loop target -- and in one
+   * 12,544-byte stretch 23 of 26 padding runs were that, not boundaries.
+   * Requiring the run to end on an alignment boundary separates the two.
+   *
+   * This is the only evidence kind that does not follow a reference, so it is
+   * the only one that can reach a function nothing points at.
+   */
+  | 'padding-aligned';
 
 export interface Candidate {
   readonly va: number;
@@ -154,6 +175,10 @@ export interface GapReport {
    *  linker placed in the executable section. */
   readonly residueGaps: number;
   readonly residueBytes: number;
+  /** Spans whose extent the bytes DO settle. `added` counts only those
+   *  written, which on a dry run is zero -- so without this the report could
+   *  not tell a span that measured from one that failed. */
+  readonly measured: number;
   readonly added: number;
   /** Residue that could not be measured into an extent, with the reason and
    *  its first bytes, so a rule that is wrong can be revisited against what

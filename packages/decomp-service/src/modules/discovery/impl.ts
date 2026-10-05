@@ -89,6 +89,7 @@ export class DiscoveryImpl
 
     const byEvidence: Record<Evidence, number> = {
       'proven-call': 0, 'data-pointer': 0, 'decoded-call': 0, 'gap-residue': 0,
+      'padding-aligned': 0,
     };
     const deferred: { va: number; reason: string }[] = [];
     const fresh = new Map<number, Candidate>();
@@ -186,6 +187,15 @@ export class DiscoveryImpl
         .map((r: unknown) => (r as { va: number }).va),
     );
 
+    /**
+     * Every address where a padding run ends on a 16-byte boundary.
+     *
+     * These bound each other, which is what the gap walk was missing: a
+     * function inside a dense stretch could not be measured because the only
+     * available end bound was the next INVENTORY entry, often thousands of
+     * bytes away past several other functions. Boundary-to-boundary is the
+     * span MSVC actually laid out.
+     */
     // 0x90 is NOP and 0xCC is INT3; MSVC pads between functions with either.
     // 0x00 is counted as padding too: the linker zero-fills to a boundary,
     // and `00 00` decodes as a valid instruction, which is exactly how
@@ -202,6 +212,7 @@ export class DiscoveryImpl
       paddingBytes: 0,
       residueGaps: 0,
       residueBytes: 0,
+      measured: 0,
       added: 0,
       deferred: [] as Array<{ va: number; bytes: number; reason: string; head: string }>,
     };
@@ -225,37 +236,54 @@ export class DiscoveryImpl
       report.residueGaps += 1;
       report.residueBytes += gapHi - gapLo;
 
-      // Walk the gap: skip padding, measure an extent from the first real
-      // byte, repeat. A gap can hold more than one unreferenced function.
-      let at = gapLo;
-      while (at < gapHi) {
-        const b = byteAt(at);
-        if (b === undefined) break;
-        if (PAD.has(b)) { at += 1; continue; }
-        if (rejected.has(at)) { at += 1; continue; }
+      // Split the gap at padding boundaries first, then measure each span
+      // against the NEXT boundary rather than against the far end of the gap.
+      const bounds: number[] = [gapLo];
+      for (let va = gapLo; va < gapHi; va++) {
+        const b = byteAt(va);
+        if (b === undefined || !PAD.has(b)) continue;
+        let end = va;
+        while (end < gapHi && PAD.has(byteAt(end) ?? 0)) end += 1;
+        if (end % 16 === 0 && end < gapHi && !PAD.has(byteAt(end) ?? 0x90)) {
+          bounds.push(end);
+        }
+        va = end;
+      }
+      bounds.push(gapHi);
 
-        const extent = yield* disasm.measureExtent(img, at, gapHi);
+      for (let k = 0; k + 1 < bounds.length; k++) {
+        const at = bounds[k]!;
+        const until = bounds[k + 1]!;
+        const b = byteAt(at);
+        if (b === undefined || PAD.has(b) || rejected.has(at)) continue;
+
+        const extent = yield* disasm.measureExtent(img, at, until);
         if (Option.isNone(extent)) {
           const head = [...img.bytes.subarray(at - img.imageBase, at - img.imageBase + 8)]
             .map((x) => x.toString(16).padStart(2, '0'))
             .join(' ');
           report.deferred.push({
             va: at,
-            bytes: gapHi - at,
-            reason: 'does not decode contiguously to a terminator within the gap',
+            bytes: until - at,
+            reason:
+              'does not decode contiguously to a terminator before the next ' +
+              'padding boundary',
             head,
           });
-          break;
+          continue;
         }
         const size = extent.value;
+        report.measured += 1;
         if (add) {
+          // `padding-aligned` when the span starts at a boundary this scan
+          // found, which is the evidence that it is an entry at all.
+          const evidence = k === 0 ? 'gap-residue' : 'padding-aligned';
           report.added += yield* db.run(
             `INSERT INTO functions(subject_sha, va, size, discovered_by)
-             VALUES (?,?,?,'gap-residue') ON CONFLICT(subject_sha, va) DO NOTHING`,
-            [sha, at, size],
+             VALUES (?,?,?,?) ON CONFLICT(subject_sha, va) DO NOTHING`,
+            [sha, at, size, evidence],
           );
         }
-        at += size;
       }
     }
     // Stored: the frontier has to be countable, and its size needs a history.

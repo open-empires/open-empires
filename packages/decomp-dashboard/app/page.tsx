@@ -116,12 +116,13 @@ const evidenceExplain = (k: string): string =>
           : '';
 
 /**
- * A note is meant to be rewritten every ten minutes or so, so anything much
- * older than that is probably not what is happening any more. Shown rather
- * than hidden: a stale note that looks current is worse than no note.
+ * The note is meant to be rewritten about every five minutes, so anything
+ * past ten is behind. Marked rather than hidden: a stale note that reads as
+ * current is worse than no note, and the mark is also the only thing that
+ * makes a lapse in the cadence visible to the person writing it.
  */
 const noteIsStale = (updatedAt: number): boolean =>
-  Date.now() / 1000 - updatedAt > 20 * 60;
+  Date.now() / 1000 - updatedAt > 10 * 60;
 
 /**
  * The clock time, then how long ago in parentheses.
@@ -328,7 +329,7 @@ export default function Page() {
             <div className={noteIsStale(s.workingOn.updatedAt) ? 'prov stale' : 'prov'}>
               last updated {stampedAgo(s.workingOn.updatedAt)}
               {noteIsStale(s.workingOn.updatedAt)
-                ? ' — older than 20 minutes, so it may no longer describe what is happening'
+                ? ' — behind the five-minute cadence, so it may no longer describe what is happening'
                 : ''}
             </div>
             {s.workingOn.note.split(/\n\s*\n/).map((para, i) => (

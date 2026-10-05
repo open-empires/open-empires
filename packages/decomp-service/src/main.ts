@@ -440,6 +440,7 @@ const routes = async (req: Request): Promise<Response> => {
               residueGaps: g.residueGaps,
               residueBytes: g.residueBytes,
               residuePct: Number(((100 * g.residueBytes) / g.textBytes).toFixed(2)),
+              measured: g.measured,
               added: g.added,
               deferred: g.deferred.length,
               // The largest unmeasurable regions first: these are where the
@@ -853,6 +854,57 @@ const supervise = () => {
         `(${((100 * g.residueBytes) / g.textBytes).toFixed(2)}%)`,
     );
   }, 390); // first run delayed: decodes the whole executable span
+
+  // THE WHOLE-TREE PROOF, which was not running at all.
+  //
+  // Every `submit` compiles one reconstruction and compares its bytes, so
+  // per-function verification has never stopped. The COMPOSITION proof is a
+  // different question: it recompiles every reconstruction in force, places
+  // each at its real address, and diffs the assembled span against the
+  // subject. That is what catches two functions claiming overlapping bytes,
+  // or a reconstruction that stops matching once its neighbours are placed
+  // around it.
+  //
+  // It existed only as `bun src/verify.ts`, run by hand. It last ran 21 hours
+  // ago over 2,614 functions while 3,356 are now proven, so 742 of them had
+  // never been through it. "Proved individually" and "proved together" are
+  // different claims and only the first was being made.
+  //
+  // Gated on the proven set having CHANGED since the last run, because the
+  // run recompiles thousands of functions through one serialised compiler and
+  // repeating it over an unchanged set would take compile slots from agents
+  // to re-answer a question nothing had altered.
+  every('composition proof', 1800, async () => {
+    const outcome = await Effect.runPromise(
+      provided(
+        Effect.gen(function* () {
+          const db = yield* modules.Db;
+          const now = (yield* db.one('SELECT COUNT(*) AS n FROM proven')) as { n: number };
+          const last = (yield* db.one(
+            'SELECT considered FROM composition_runs ORDER BY id DESC LIMIT 1',
+          )) as { considered: number } | null;
+          if (last !== null && last.considered === now.n) {
+            return { skipped: true as const, proven: now.n };
+          }
+          const r = yield* (yield* modules.Compose).run();
+          return { skipped: false as const, run: r, proven: now.n };
+        }),
+      ),
+    );
+    if (outcome.skipped) return;
+    const r = outcome.run;
+    console.log(
+      `[composition] placed ${r.placed} of ${r.considered} reconstruction(s), ` +
+        `${r.placedBytes} byte(s), ${r.diffBytes} differing`,
+    );
+    if (r.diffBytes > 0) {
+      console.error(
+        `[composition] THE ASSEMBLED SPAN DIFFERS FROM THE SUBJECT in ` +
+          `${r.diffBytes} byte(s) -- functions that pass individually do not ` +
+          'agree once placed together',
+      );
+    }
+  }, 450); // first run delayed: recompiles every reconstruction in force
 
   // The portable tree is a CONSEQUENCE of the proven set, like discovery.
   // It had been run once, covering 2,614 files while 3,314 were proven, so

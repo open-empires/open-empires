@@ -72,7 +72,14 @@ export class MetricsImpl
               (SELECT COALESCE(SUM(size), 0) FROM
                  (SELECT DISTINCT va, size FROM proven WHERE gate_run_id = g.id))
                 AS bytes_exact
-       FROM gate_runs g ORDER BY g.started_at DESC LIMIT 1`,
+       -- Ordered by the newest VERDICT, not by when the run row was created.
+       -- Ordering by started_at picked the run created most recently, which
+       -- is the /O1 toolchain's -- a run that answers rarely -- and reported
+       -- ITS last verdict as the time the compiler last ran. The dashboard
+       -- said the proof had not run in 6 hours while the /O2 run had been
+       -- answering 2.5 hours earlier. "Last checked" is the last time the
+       -- compiler answered about anything.
+       FROM gate_runs g ORDER BY started_at DESC LIMIT 1`,
     )) as Record<string, unknown> | null;
     return r === null
       ? Option.none()

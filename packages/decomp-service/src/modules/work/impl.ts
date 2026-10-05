@@ -280,6 +280,31 @@ export class WorkImpl
       `[claim] 0x${va.toString(16)} ${size}B described in ` +
         `${Date.now() - started}ms (${marks.join(' ')})`,
     );
+    // How this entry was found, because for one evidence kind the extent is
+    // derived from LAYOUT rather than from a reference, and its size is right
+    // about nine times in ten.
+    const found = (yield* db.one(
+      'SELECT discovered_by FROM functions WHERE va = ?',
+      [va],
+    )) as { discovered_by: string | null } | null;
+    const caution =
+      found?.discovered_by === 'padding-aligned'
+        ? '\n\n;; HOW THIS ONE WAS FOUND: nothing in the game refers to it. It was\n' +
+          ';; located by layout -- MSVC aligns each function to 16 bytes and fills\n' +
+          ';; the gap before it, so the end of that filler is where a function\n' +
+          ';; begins. Measured against 1,119 functions already proven: the size\n' +
+          ';; this gives is exactly right 89.7% of the time and is NEVER too\n' +
+          ';; short. The 8.3% that are wrong are too LONG -- they cover this\n' +
+          ';; function and the next one, which happens when a function has no\n' +
+          ';; filler after it because the next was already aligned.\n' +
+          ';;\n' +
+          ';; So before reconstructing, check the listing for a SECOND prologue\n' +
+          ';; after a ret. If you find one, this entry is two functions: park it\n' +
+          ';; with blockedClass "padding-aligned extent covers two functions" and\n' +
+          ';; the address where the second begins. Do not try to write one\n' +
+          ';; function for both.'
+        : '';
+
     return {
       va,
       size,
@@ -297,7 +322,7 @@ export class WorkImpl
           `against this span to settle it. Do NOT reconstruct from a guess ` +
           `-- the extent has to be established first ` +
           `(POST /api/discovery/workability).`,
-      ),
+      ) + caution,
       siblings: top.map((s) => ({
         va: s.va,
         similarity: s.exactShape ? 1 : s.mnemonicSimilarity,
