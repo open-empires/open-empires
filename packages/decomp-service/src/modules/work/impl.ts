@@ -684,12 +684,22 @@ export class WorkImpl
     yield* db.run(`UPDATE claims SET released_at = ? WHERE va = ? AND agent_id = ?`, [t, va, agentId]);
   }
 
-  *release(agentId: string, va: number): EffectGen<void, DbError> {
+  /**
+   * Give a claim back. Answers whether anything was actually released.
+   *
+   * It used to return void, so a release of an address the caller did not
+   * hold -- a typo, a wrong hex conversion, an id that does not match -- was
+   * a silent success. Two were issued against wrong addresses today and both
+   * reported 200 while the real claim stayed held. An acknowledgement that
+   * does not check what it did is the same fault `reject` had.
+   */
+  *release(agentId: string, va: number): EffectGen<boolean, DbError> {
     yield* this.touch(agentId);
-    yield* this.dependencies.Db.run(
+    const freed = yield* this.dependencies.Db.run(
       `UPDATE claims SET released_at = ? WHERE va = ? AND agent_id = ? AND released_at IS NULL`,
       [now(), va, agentId],
     );
+    return freed > 0;
   }
 
   *reapExpiredClaims(): EffectGen<number, DbError> {

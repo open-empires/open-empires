@@ -220,9 +220,18 @@ const routes = async (req: Request): Promise<Response> => {
                 String(body.eliminated ?? ''),
               );
               return { ok: true };
-            case 'release':
-              yield* work.release(agentId, num(body.va));
-              return { ok: true };
+            case 'release': {
+              const freed = yield* work.release(agentId, num(body.va));
+              return freed
+                ? { ok: true, released: true }
+                : {
+                    ok: false,
+                    released: false,
+                    error:
+                      `${agentId} holds no live claim on 0x${num(body.va).toString(16)}, ` +
+                      'so nothing was released',
+                  };
+            }
             // One call asks every flag set. It costs the compiler, so it needs
             // the same live lease `submit` does, and it writes nothing: a hit
             // under flags the configuration does not name is a finding for a

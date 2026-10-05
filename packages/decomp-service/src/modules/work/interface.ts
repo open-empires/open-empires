@@ -237,7 +237,9 @@ export interface IWork {
   park(agentId: string, va: number, blockedClass: string, eliminated: string):
     EffectGen<void, DbError | NotClaimed>;
 
-  release(agentId: string, va: number): EffectGen<void, DbError>;
+  /** True when a live claim was actually given back. False means the caller
+   *  did not hold that address, which must not read as success. */
+  release(agentId: string, va: number): EffectGen<boolean, DbError>;
 
   /** Expire leases whose time is up. Owned by the server, run on a timer --
    *  never something a caller must remember. */
