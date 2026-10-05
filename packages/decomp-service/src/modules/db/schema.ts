@@ -1634,4 +1634,113 @@ CREATE INDEX port_stranded_by_literal
     ON port_stranded_literals(subject_sha, literal);
 `,
   },
+  {
+    id: '021-unreferenced-import-slots',
+    sql: `
+-- Import slots that NO instruction anywhere in the image refers to.
+--
+-- 241 of 255 slots are referenced. These 14 are not: a scan of every
+-- executable section for FF 15 / FF 25, and of the whole file for any dword
+-- equal to a slot address -- so vtables and .rdata are covered -- finds no
+-- reference to any of them.
+--
+-- That settles them. SafeDisc's dispatcher matches the calling instruction's
+-- disp32 against the record's slot, so a slot nothing calls can never be
+-- dispatched and its cache can never fill. No further memory capture will
+-- ever name one, and two captures were already spent partly on the hope that
+-- one would. They are dead entries left behind by the protection's remap:
+-- their original names were 13 KERNEL32 and 1 USER32 name from the residual
+-- set, but the slot-to-name correspondence died with the overwritten name
+-- table.
+--
+-- For the browser build this is not a loss. A slot nothing calls needs no
+-- implementation.
+CREATE TABLE unreferenced_import_slots (
+  subject_sha TEXT    NOT NULL REFERENCES subjects(sha256),
+  slot        INTEGER NOT NULL,
+  reason      TEXT    NOT NULL,
+  found_at    REAL    NOT NULL,
+  PRIMARY KEY (subject_sha, slot)
+);
+
+INSERT INTO unreferenced_import_slots(subject_sha, slot, reason, found_at)
+SELECT c.subject_sha, s.slot,
+       'no instruction and no data dword in the image refers to this slot, so '
+       || 'the dispatcher can never match it and its cache can never fill',
+       strftime('%s','now')
+  FROM current_config c
+  JOIN import_slots s ON s.subject_sha = c.subject_sha
+ WHERE c.only_row = 1
+   AND s.slot IN (
+     6509788, 6509796, 6509800, 6509836, 6509932, 6509940, 6510008,
+     6510020, 6510052, 6510068, 6510088, 6510184, 6510200, 6510236
+   );
+`,
+    // A verify has to hold on a FRESH database too, where there are no import
+    // slots and inserting nothing is the correct outcome. Asserting that rows
+    // exist fails there -- which is the second time I have written that, so it
+    // is stated here: assert an INVARIANT, not a population. The invariant is
+    // that nothing recorded as an unreferenced slot is absent from the slot
+    // table, which is true of 14 rows and of none.
+    verify: `SELECT COUNT(*) AS violations
+               FROM unreferenced_import_slots u
+              WHERE NOT EXISTS (SELECT 1 FROM import_slots s
+                                 WHERE s.subject_sha = u.subject_sha
+                                   AND s.slot = u.slot)`,
+    verifyExpects: 'zero',
+  },
+  {
+    id: '022-unreferenced-import-slots-correct-addresses',
+    sql: `
+-- Migration 021 inserted NOTHING. Its slot list was fourteen decimals I typed
+-- by hand instead of converting, and not one of them was an address in the
+-- table. It passed because its verify asserted an invariant -- that no
+-- recorded slot is absent from import_slots -- which zero rows satisfy
+-- perfectly.
+--
+-- Two lessons, both already paid for elsewhere today. A decimal address must
+-- be COMPUTED, never typed: this is the fifth hand conversion to be wrong in
+-- one session and every one produced a plausible result rather than an error.
+-- And a verify has to be able to fail: "no violations" over an empty table is
+-- not evidence of anything, so this one compares the count recorded against
+-- the count of those slots that actually exist, which is 14 here and 0 on a
+-- fresh database and wrong in neither.
+--
+-- The finding itself: 241 of 255 import slots are referenced by some
+-- instruction or data dword. These 14 are referenced by nothing -- a scan of
+-- every executable section for FF 15 / FF 25, and of the whole file for any
+-- dword equal to a slot address, finds no reference. SafeDisc's dispatcher
+-- matches the calling instruction's disp32 against the record's slot, so a
+-- slot nothing calls can never be dispatched and its cache can never fill.
+-- No future memory capture will name one. They are dead entries left by the
+-- protection's remap, and for the browser build that is fine: a slot nothing
+-- calls needs no implementation.
+INSERT INTO unreferenced_import_slots(subject_sha, slot, reason, found_at)
+SELECT c.subject_sha, s.slot,
+       'no instruction and no data dword in the image refers to this slot, so '
+       || 'the dispatcher can never match it and its cache can never fill',
+       strftime('%s','now')
+  FROM current_config c
+  JOIN import_slots s ON s.subject_sha = c.subject_sha
+ WHERE c.only_row = 1
+   AND s.slot IN (
+     6508764, 6508772, 6508776, 6508812,
+     6508908, 6508916, 6508968, 6508996,
+     6509028, 6509044, 6509064, 6509160,
+     6509176, 6509212
+   )
+   AND NOT EXISTS (SELECT 1 FROM unreferenced_import_slots u
+                    WHERE u.subject_sha = c.subject_sha AND u.slot = s.slot);
+`,
+    verify: `SELECT
+      (SELECT COUNT(*) FROM unreferenced_import_slots)
+      -
+      (SELECT COUNT(*) FROM import_slots WHERE slot IN (
+         6508764, 6508772, 6508776, 6508812,
+     6508908, 6508916, 6508968, 6508996,
+     6509028, 6509044, 6509064, 6509160,
+     6509176, 6509212
+       )) AS shortfall`,
+    verifyExpects: 'zero',
+  },
 ];

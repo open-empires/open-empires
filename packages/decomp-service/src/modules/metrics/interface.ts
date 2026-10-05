@@ -130,10 +130,29 @@ export interface Blockers {
   /** Inventory entries whose recorded extent does not decode, so no agent can
    *  read them. */
   readonly undecodableEntries: number;
-  /** Import slots no memory capture has ever caught a call through. Each is a
-   *  Windows function the browser build cannot yet name. */
+  /**
+   * Slots NOTHING names -- not a memory capture, not a library's relocation
+   * table, not the import descriptor.
+   *
+   * This used to count slots with no entry in the copy protection's cache,
+   * which is a different question and overstated the problem by nine: those
+   * nine are named from the libraries' own symbol tables and only lack a
+   * cache entry. The label is true and the metric was asking the wrong thing.
+   */
   readonly unansweredImportSlots: number;
   readonly importSlotsTotal: number;
+  /**
+   * Call sites, which is the unit that actually matters.
+   *
+   * A slot is not a name. SafeDisc's dispatcher resolves on the caller's
+   * return address, so one slot serves several Windows functions depending on
+   * who calls it -- slot 0x6350d0 alone goes to CompareStringA, FindClose,
+   * LockResource, CloseHandle and GetCurrentThread at five different sites.
+   * Counting slots therefore understates the work: 1,227 indirect calls go
+   * through the import table and the browser build has to answer for each
+   * one, not for each slot.
+   */
+  readonly namedCallSites: number;
   /** Pointers stored inside the data region that cannot be placed inside a
    *  variable whose extent is settled. The browser build has to resolve every
    *  one of them. */

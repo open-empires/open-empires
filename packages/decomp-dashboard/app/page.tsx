@@ -40,6 +40,7 @@ interface Status {
     undecodableEntries: number;
     unansweredImportSlots: number;
     importSlotsTotal: number;
+    namedCallSites: number;
     unattributedDataPointers: number;
     dataPointersTotal: number;
     strandedLiterals: number;
@@ -378,7 +379,7 @@ export default function Page() {
             label="Windows calls still unnamed"
             value={`${f(s.blockers.unansweredImportSlots)} / ${f(s.blockers.importSlotsTotal)}`}
             stale={s.blockers.unansweredImportSlots > 0}
-            prov="slots the copy protection has never filled in, because the game has not called through them in any recording we have taken. Playing further no longer reaches them — they are error and edge paths, so they must be read out of the code that calls them"
+            prov={`entries in the game's table of Windows functions that nothing names — not a recording of the game running, not the system libraries' own symbol tables. ${f(s.blockers.namedCallSites)} individual call sites are named. The entry is not the unit that matters: the copy protection routes several different Windows functions through one entry and picks by which part of the game is calling, so one entry can need five different answers`}
           />
           <Card
             label="stored pointers unresolved"

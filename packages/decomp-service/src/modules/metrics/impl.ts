@@ -271,9 +271,14 @@ export class MetricsImpl
            ORDER BY at DESC LIMIT 1)                                      AS unfound_gaps,
          (SELECT COALESCE(undecodable, 0) FROM inventory_audits
            ORDER BY at DESC LIMIT 1)                                      AS undecodable,
-         (SELECT COUNT(*) FROM import_slots
-           WHERE resolution = 'no-cached-call-site')                      AS unanswered_slots,
+         (SELECT COUNT(*) FROM import_slots s
+           WHERE s.name IS NULL
+             AND NOT EXISTS (SELECT 1 FROM import_bindings b
+                              WHERE b.slot = s.slot
+                                AND b.subject_sha = s.subject_sha
+                                AND b.api IS NOT NULL))                   AS unanswered_slots,
          (SELECT COUNT(*) FROM import_slots)                              AS slots_total,
+         (SELECT COUNT(*) FROM import_bindings WHERE api IS NOT NULL)     AS named_sites,
          (SELECT COALESCE(SUM(enumerated - attributed), 0)
             FROM globals_pointer_coverage WHERE target = 'data')          AS unattributed_ptrs,
          (SELECT COALESCE(SUM(enumerated), 0)
@@ -294,6 +299,7 @@ export class MetricsImpl
       undecodableEntries: num(row?.undecodable),
       unansweredImportSlots: num(row?.unanswered_slots),
       importSlotsTotal: num(row?.slots_total),
+      namedCallSites: num(row?.named_sites),
       unattributedDataPointers: num(row?.unattributed_ptrs),
       dataPointersTotal: num(row?.ptrs_total),
       strandedLiterals: num(row?.stranded),
