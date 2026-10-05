@@ -27,6 +27,29 @@ export class WorkImpl
   extends implementing(modules.Work).uses(modules.Db, modules.Gate, modules.Disasm, modules.Subject)
   implements IWork
 {
+  /**
+   * Touch the agent's heartbeat.
+   *
+   * Called by every work method, because a heartbeat an agent has to
+   * REMEMBER is one that stops being accurate exactly when the agent is busy.
+   * Wiring it only to an explicit /beat endpoint -- which the guide never
+   * told anyone to call -- meant `gone` really meant "has been working for
+   * more than ten minutes", and two agents were shown as dead while
+   * holding live claims and making progress.
+   *
+   * An unregistered or finished agent simply updates no rows, which is the
+   * right outcome -- a heartbeat must not invent an agent. A DbError does
+   * propagate, because a failing write here means the database is broken and
+   * the caller is about to find that out anyway.
+   */
+  private *touch(agentId: string): EffectGen<void, DbError> {
+    yield* this.dependencies.Db.run(
+      `UPDATE agents SET last_beat = ?, beats = beats + 1
+       WHERE id = ? AND finished IS NULL`,
+      [now(), agentId],
+    );
+  }
+
   *claim(
     agentId: string,
     count: number,
@@ -35,6 +58,7 @@ export class WorkImpl
   ): EffectGen<ReadonlyArray<WorkItem>, WorkFailure> {
     const db = this.dependencies.Db;
     const t = now();
+    yield* this.touch(agentId);
 
     // Named addresses bypass the queue's ordering but NOT its rules: an
     // address already proven, or under someone else's live lease, is still
@@ -216,6 +240,7 @@ export class WorkImpl
     const db = this.dependencies.Db;
     const gate = this.dependencies.Gate;
     const t = now();
+    yield* this.touch(agentId);
 
     const { original } = yield* this.claimed(agentId, va);
 
@@ -392,6 +417,7 @@ export class WorkImpl
     const db = this.dependencies.Db;
     const gate = this.dependencies.Gate;
     const t = now();
+    yield* this.touch(agentId);
 
     const fn = (yield* db.one(`SELECT size FROM functions WHERE va = ?`, [va])) as
       | { size: number }
@@ -442,6 +468,7 @@ export class WorkImpl
   ): EffectGen<void, DbError | NotClaimed> {
     const db = this.dependencies.Db;
     const t = now();
+    yield* this.touch(agentId);
     const held = yield* db.one(
       `SELECT 1 FROM claims WHERE va = ? AND agent_id = ? AND released_at IS NULL`,
       [va, agentId],
@@ -459,6 +486,7 @@ export class WorkImpl
   }
 
   *release(agentId: string, va: number): EffectGen<void, DbError> {
+    yield* this.touch(agentId);
     yield* this.dependencies.Db.run(
       `UPDATE claims SET released_at = ? WHERE va = ? AND agent_id = ? AND released_at IS NULL`,
       [now(), va, agentId],
