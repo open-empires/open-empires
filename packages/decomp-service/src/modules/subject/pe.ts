@@ -77,14 +77,55 @@ export const textSpan = (
 };
 
 /**
+ * Is this file a MEMORY image rather than an on-disk PE?
+ *
+ * It decides how a virtual address maps to a file offset, and getting it
+ * wrong reads the wrong bytes without failing. A loaded image has each
+ * section at its RVA, so the offset is `va - imageBase`. An on-disk PE packs
+ * them at their raw offsets, which are smaller because uninitialised data and
+ * page padding are not stored.
+ *
+ * The file states which it is: a memory image spans the whole virtual image,
+ * while a PE on disk stops at the end of its raw data. For this subject the
+ * file is 0x3a5000 bytes, exactly the page-aligned virtual span of 0x3a4866,
+ * and the raw data ends at 0x293000 -- 1.1MB short.
+ *
+ * This mattered because the two mappings AGREE for the first four sections of
+ * this subject and disagree by 0x112000 for the last three, so reads from
+ * .text, THIS_COD, .rdata and .data were correct and nothing suggested a
+ * problem. Reads from THIS_DAT, Inf32Dat and .rsrc landed in a zero-filled
+ * region and returned zeros: at 0x7a1000 the real bytes are a resource
+ * directory -- 3 named and 3 id entries -- and the reader handed back 48
+ * zeros instead. A reader that cannot fail fabricates data, and zeros are
+ * the most plausible-looking fabrication there is.
+ */
+const isMemoryImage = (image: PeImage): boolean => {
+  const span = image.sections.reduce(
+    (hi, s) => Math.max(hi, s.va + s.virtualSize),
+    0,
+  ) - image.imageBase;
+  if (span <= 0) return false;
+  return image.bytes.length >= ((span + 0xfff) & ~0xfff);
+};
+
+/**
  * Where a virtual address sits in the file. `max(virtualSize, rawSize)`
  * because a section may declare less raw data than it occupies in memory, and
  * the structures read through this live in the overlap.
+ *
+ * ONE answer per image, chosen from the image: `va - imageBase` for a memory
+ * image, the section's raw offset for a PE on disk. The disassembler and the
+ * globals derivation both already read this subject as `va - imageBase`, so
+ * before this there were two mappings in the codebase that disagreed about
+ * three sections, and which one you got depended on which module you asked.
  */
 export const fileOffsetOfVa = (image: PeImage, va: number): Option.Option<number> => {
+  const flat = isMemoryImage(image);
   for (const s of image.sections) {
     if (va >= s.va && va < s.va + Math.max(s.virtualSize, s.rawSize)) {
-      return Option.some(s.rawOffset + (va - s.va));
+      return Option.some(
+        flat ? va - image.imageBase : s.rawOffset + (va - s.va),
+      );
     }
   }
   return Option.none();
