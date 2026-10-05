@@ -117,6 +117,31 @@ const lastLine = (text: string): string => {
   return (lines[lines.length - 1] ?? '').slice(0, 120);
 };
 
+/**
+ * What the COMPILER said, out of the build log.
+ *
+ * The log always ends with the shell's own `status=2 size=0` echo, and the
+ * diagnostic was taken as its last line -- so every failed compile reported
+ * that echo and discarded `error C2664: cannot convert parameter 1 ...`
+ * sitting a few lines above it. An agent writing a draft that does not
+ * compile was told only that it did not compile, and one resorted to running
+ * `docker exec` against the gate's own container to read the real message.
+ *
+ * MSVC writes `file(line) : error C####: text`, so those lines are pulled out
+ * in order and the rest -- the banner, the file echo, the status line -- is
+ * dropped. Several are kept because the first error is often a consequence of
+ * a later one. If none matches, the tail is returned, because an empty
+ * diagnostic is worse than a noisy one.
+ */
+export const compilerDiagnostic = (log: string): string => {
+  const said = log
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /\b(?:error|fatal error) C\d+/.test(l));
+  if (said.length === 0) return lastLine(log.slice(-800) || 'no object');
+  return said.slice(0, 5).join(' | ').slice(0, 600);
+};
+
 interface Ran {
   readonly code: number;
   readonly stdout: string;
@@ -342,7 +367,7 @@ export class GateImpl extends implementing(modules.Gate) implements IGate {
             ? await Bun.file(logPath).text()
             : '';
           if (!(await Bun.file(objectPath).exists())) {
-            return { built: false, diagnostic: lastLine(log.slice(-800) || 'no object') };
+            return { built: false, diagnostic: compilerDiagnostic(log) };
           }
           const object = await Bun.file(objectPath).bytes();
           // "It appeared and is non-empty" is not "it is the object": the
@@ -356,11 +381,12 @@ export class GateImpl extends implementing(modules.Gate) implements IGate {
           if ((status !== undefined && status !== '0') || (want !== undefined && object.length !== want)) {
             return {
               built: false,
-              diagnostic: lastLine(
-                `compile did not produce a complete object: cl status=${status}, ` +
-                  `container size=${want}, read ${object.length} bytes\n` +
-                  log.slice(-500),
-              ),
+              // The compiler's own words first, then the mechanical detail.
+              // Taking the last line put the shell's status echo here and
+              // threw the error message away.
+              diagnostic:
+                `${compilerDiagnostic(log)} [cl status=${status}, ` +
+                `container size=${want}, read ${object.length} bytes]`,
             };
           }
           return { built: true, object };
