@@ -221,33 +221,34 @@ export default function Page() {
         title="Phase 2 · Recovering the source"
         explain={
           <>
-            Each of the game&apos;s {f(s.phase2.inventory)} functions has to be written
-            back out as C++. A function counts only when the compiler reproduces its
-            exact bytes — so these are proofs, not estimates.{' '}
-            <strong>Near-misses</strong> are functions we fully understand but whose
-            compiled output differs by a few bytes.{' '}
-            <strong>Unevidenced spelling</strong> means the bytes match but several
-            different ways of writing the source would produce them, so the exact
-            original wording is a guess among equals.
+            Each of the game&apos;s {f(s.phase2.inventory)} functions has to be
+            written back out as C++. A function counts only when MSVC 6.0 —
+            the compiler Microsoft shipped in 1998 — turns that source into
+            the <strong>exact same bytes</strong> as the shipped game. So these
+            are proofs, not estimates, and a function either passes or does
+            not.{' '}
+            <strong>Two things the test cannot check</strong>, both tracked
+            below: addresses the linker fills in are skipped, and where several
+            different ways of writing the source compile to identical bytes,
+            the bytes cannot say which one the authors wrote.
           </>
-        }
-      >
+        }      >
         <div className="grid">
           <Card label="proven byte-exact" value={f(s.phase2.proven)}
-                prov={`checked ${ago(gate?.at)}${gateStale ? ' · stale' : ''}`}
+                prov={`the compiler reproduced these exactly, last answered ${ago(gate?.at)}`}
                 stale={gateStale} />
           <Card label="of the game covered" value={`${s.phase2.pctText.toFixed(2)}%`}
-                prov={`${f(s.phase2.bytesProven)} of ${f(s.phase2.textSpan)} bytes of code`} />
+                prov={`${f(s.phase2.bytesProven)} of ${f(s.phase2.textSpan)} bytes of executable code. Measured in BYTES, not functions — the remaining functions are on average much larger`} />
           <Card label="near-misses" value={f(s.phase2.near)}
-                prov="understood, but a few bytes differ" />
+                prov="the logic is understood and the program would behave identically; the compiler just arranged a few bytes differently. Each one records exactly which bytes and what was already ruled out" />
           <Card label="still untouched" value={f(s.phase2.open)}
-                prov="no source written yet" />
+                prov="no source attempted yet. This is the queue agents draw from" />
           <Card label="written by hand" value={f(s.phase2.reconstructions)}
-                prov={`plus ${f(s.phase2.crt)} identified from Microsoft's own 1998 library`} />
+                prov={`C++ someone actually wrote. The other ${f(s.phase2.crt)} were identified by matching Microsoft's own 1998 library, so they needed no reconstruction`} />
           <Card label="retired proofs" value={f(s.phase2.superseded)}
-                prov="proved under a compiler or subject no longer in force" />
+                prov="were accepted once but no longer count, because the compiler or the binary they were checked against changed. Shown rather than hidden: a shrinking count after a toolchain change is correct" />
           <Card label="weakly verified" value={f(s.phase2.weak)}
-                prov="over a quarter of their bytes are addresses the test cannot check" />
+                prov="byte-exact, but over a quarter of their bytes are addresses the linker fills in, which the test must skip. Still proofs — just resting on fewer compared bytes" />
         </div>
       </Section>
 
@@ -296,16 +297,16 @@ export default function Page() {
       >
         <div className="grid">
           <Card label="call sites identified" value={f(s.imports.bindings)}
-                prov={`${f(s.imports.bindingsVerified)} independently cross-checked`} />
+                prov={`places in the game where we know which Windows function is being called. ${f(s.imports.bindingsVerified)} of them cross-checked against the instruction that makes the call`} />
           <Card label="distinct Windows functions" value={f(s.imports.distinctApis)}
-                prov="each matched exactly to a real system library entry" />
+                prov="each matched exactly to an entry in a real system library read out of the memory dump — not inferred from how it is used" />
           <Card label="entries with one answer" value={f(pick(s.imports.byResolution, 'export-exact'))}
-                prov={`of ${f(s.imports.slots)} total`} />
+                prov={`of ${f(s.imports.slots)} entries in the game's import table. These behave normally: one entry, one Windows function`} />
           <Card label="entries serving several" value={f(pick(s.imports.byResolution, 'multiple-apis'))}
-                prov="must be resolved per call site" />
+                prov="the copy protection routes several different Windows functions through one entry, picking by which part of the game is calling. These can only be resolved per call site" />
           <Card label="not yet observed"
                 value={f(pick(s.imports.byResolution, 'no-cached-call-site'))}
-                prov="the game never reached these before the memory dump was taken" />
+                prov="the protection only records an entry once the game actually calls it, and the game had not reached these when the memory dump was taken. Playing further would capture them" />
         </div>
       </Section>
 
@@ -323,12 +324,14 @@ export default function Page() {
       >
         <div className="grid">
           <Card label="functions with a real name" value={f(s.symbols.named)}
-                prov="read out of text the game carries" />
+                prov="recovered from text the game itself carries. Every one is attributed to exactly one function; where a name appeared in two places it was withheld rather than guessed" />
           <Card label="real class names" value={f(s.symbols.classes)}
-                prov="e.g. diam_map, pnl_lst, scr_game" />
+                prov="e.g. diam_map, pnl_lst, scr_game — the words the original authors used, which also tell us how the code was organised" />
           {s.symbols.byConfidence.map((c) => (
             <Card key={c.key} label={c.key.replace(/-/g, ' ')} value={f(c.n)}
-                  prov="how the name was established" />
+                  prov={c.key === 'lock-tag'
+                    ? 'the function passes its own name to internal bookkeeping code, which still runs in the shipped build'
+                    : 'named through a second, separate bookkeeping call with the same shape'} />
           ))}
         </div>
       </Section>

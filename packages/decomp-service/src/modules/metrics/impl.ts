@@ -61,8 +61,14 @@ export class MetricsImpl
     const r = (yield* this.dependencies.Db.one(
       // gate_runs carries no byte total; bytes are summed from the verdicts
       // that run produced, so the two can never disagree.
-      `SELECT g.id AS id, g.started_at AS started_at, g.exact AS exact,
-              g.toolchain_id AS toolchain_id,
+      // `at` is the newest VERDICT this run decided, not when the run row was
+      // created. A run is reused for the life of a toolchain, so started_at
+      // froze at the import and the dashboard said "checked 3.7h ago" while
+      // verdicts were landing every few seconds. "Checked" means the last
+      // time the compiler actually answered.
+      `SELECT g.id AS id, g.exact AS exact, g.toolchain_id AS toolchain_id,
+              COALESCE((SELECT MAX(v.decided_at) FROM verdicts v
+                        WHERE v.gate_run_id = g.id), g.started_at) AS started_at,
               (SELECT COALESCE(SUM(size), 0) FROM
                  (SELECT DISTINCT va, size FROM proven WHERE gate_run_id = g.id))
                 AS bytes_exact

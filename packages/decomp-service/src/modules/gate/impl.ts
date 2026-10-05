@@ -1,4 +1,5 @@
 import { Effect, Option } from 'effect';
+import { acquireCompileSlot, releaseCompileSlot } from './throttle';
 import { implementing, type EffectGen } from 'effective-modules';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -174,7 +175,30 @@ export class GateImpl extends implementing(modules.Gate) implements IGate {
    * sees are recorded and checked against what is read back, because a short
    * read surfaced as "no code in object" and named the wrong problem.
    */
+  /**
+   * One compilation, holding a compile permit for its whole duration.
+   *
+   * The permit is the only thing standing between a burst of requests and an
+   * unresponsive service: 60 concurrent sweeps once timed out the
+   * supervisor's own health probe. Requests now queue, so a burst costs
+   * latency instead of availability.
+   */
   private *compile(source: string, flags: string): EffectGen<Compilation, GateUnavailable> {
+    yield* Effect.promise(() => acquireCompileSlot());
+    try {
+      return yield* this.compileUnthrottled(source, flags);
+    } finally {
+      // However this ends -- success, compiler failure, or an interrupted
+      // fiber -- the permit goes back. A leaked permit deadlocks the gate
+      // after LIMIT of them.
+      releaseCompileSlot();
+    }
+  }
+
+  private *compileUnthrottled(
+    source: string,
+    flags: string,
+  ): EffectGen<Compilation, GateUnavailable> {
     yield* this.ensureContainer();
     const tag = crypto.randomUUID().replaceAll('-', '').slice(0, 8);
     const bytes = new TextEncoder().encode(source);
