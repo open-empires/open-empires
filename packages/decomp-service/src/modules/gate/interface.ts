@@ -81,6 +81,12 @@ export interface Toolchain {
   /** `${clSha256}:${flags}`. Proofs are stored under this. */
   readonly id: string;
   /** sha256 of cl.exe's own bytes. */
+  /**
+   * sha256 over every binary that decides the output -- CL.EXE, C1.DLL,
+   * C1XX.DLL, C2.DLL and LINK.EXE -- not over cl.exe alone. The name is kept
+   * because it is a stored column, but it has not meant "cl.exe's own bytes"
+   * since that identity turned out not to change when the code generator did.
+   */
   readonly clSha256: string;
   readonly flags: string;
   /**
@@ -110,6 +116,17 @@ export interface GateAttempt {
   readonly source: string;
   /** `SUBJECT_FLAGS` or `SUBJECT_FLAGS_O1`. */
   readonly flags: string;
+  /**
+   * Which compiler install to use: a directory name under the toolchain root.
+   * Defaults to `vc98`, build 8447.
+   *
+   * The subject was built by TWO compilers -- its own Rich header records 306
+   * objects from build 8447 and 169 from build 8168 -- so an attempt has to be
+   * able to say which one it is claiming. The verdict records the toolchain
+   * that produced it, and a proof is only a proof under the compiler that
+   * made it.
+   */
+  readonly toolchain?: string;
 }
 
 /** What the gate decided about one attempt. */
@@ -196,7 +213,7 @@ export interface IGate {
    * Derived from the compiler's bytes and confirmed by a probe compile, so it
    * cannot be satisfied by a version banner.
    */
-  toolchain(flags: string): EffectGen<Toolchain, GateUnavailable>;
+  toolchain(flags: string, install?: string): EffectGen<Toolchain, GateUnavailable>;
 
   /**
    * Compile ONE reconstruction, alone, and compare it to the subject's bytes.

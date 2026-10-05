@@ -211,6 +211,7 @@ const routes = async (req: Request): Promise<Response> => {
                 yield* work.submit(
                   agentId, num(body.va), String(body.source ?? ''),
                   String(body.flags ?? SUBJECT_FLAGS),
+                  Option.getOrUndefined(str(body.toolchain)),
                 ),
               );
             case 'amend':
@@ -218,6 +219,7 @@ const routes = async (req: Request): Promise<Response> => {
                 yield* work.amend(
                   agentId, num(body.va), String(body.source ?? ''),
                   String(body.flags ?? SUBJECT_FLAGS),
+                  Option.getOrUndefined(str(body.toolchain)),
                 ),
               );
             case 'park':
@@ -253,6 +255,7 @@ const routes = async (req: Request): Promise<Response> => {
                   Array.isArray(body.flagSets) && body.flagSets.length > 0
                     ? body.flagSets.map((f) => String(f))
                     : SWEEP_FLAG_SETS,
+                  Option.getOrUndefined(str(body.toolchain)),
                 ),
               );
             case 'depth':
@@ -331,6 +334,7 @@ const routes = async (req: Request): Promise<Response> => {
             progress: yield* m.progress(24 * 3600, 80),
             queue: yield* m.queue(),
             inventory: yield* m.inventoryHealth(),
+            blockers: yield* m.blockers(),
             workingOn: Option.match(yield* m.workingOn(), {
               onNone: () => null,
               onSome: (w) => ({ note: w.note, updatedAt: w.updatedAt }),

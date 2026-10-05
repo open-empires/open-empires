@@ -29,8 +29,36 @@ const TOOLCHAIN_ROOT = path.resolve(
   process.env.DECOMP_TOOLCHAIN ??
     path.join(import.meta.dir, '../../../../aoe2-in-browser/work/toolchain'),
 );
-const VC98 = path.join(TOOLCHAIN_ROOT, 'vc98');
-const CL_EXE = path.join(VC98, 'VC98/Bin/CL.EXE');
+/**
+ * Which install to compile with. A toolchain is a DIRECTORY under
+ * `TOOLCHAIN_ROOT`, named here so two can stand side by side.
+ *
+ * The subject was built by two compilers -- its Rich header records 306
+ * objects from build 8447 and 169 from 8168 -- so `vc98-8168` now sits beside
+ * `vc98`, and an attempt has to be able to say which it means.
+ */
+export const DEFAULT_TOOLCHAIN = 'vc98';
+
+const vc98Dir = (toolchain: string): string => path.join(TOOLCHAIN_ROOT, toolchain);
+const clExe = (toolchain: string): string =>
+  path.join(vc98Dir(toolchain), 'VC98/Bin/CL.EXE');
+
+/**
+ * One container per toolchain, named after it.
+ *
+ * `ensureContainer` returned early whenever a container of the right NAME was
+ * running, without checking what it had mounted at /vc98. With one fixed name
+ * and a second install on disk, pointing the service at 8168 while the 8447
+ * container was up would have hashed 8168's bytes, compiled with 8447, and
+ * recorded every verdict against the wrong prover -- silently, and in exactly
+ * the direction this project has already been burned. The default keeps the
+ * existing name so the running container is not disturbed.
+ */
+const containerFor = (toolchain: string): string =>
+  toolchain === DEFAULT_TOOLCHAIN ? 'oe-cc-live' : `oe-cc-live-${toolchain}`;
+
+const VC98 = vc98Dir(DEFAULT_TOOLCHAIN);
+const CL_EXE = clExe(DEFAULT_TOOLCHAIN);
 
 /**
  * Every binary that decides what the compiler emits.
@@ -49,18 +77,20 @@ const CL_EXE = path.join(VC98, 'VC98/Bin/CL.EXE');
  * been reused by its primary key, and every proof taken under one code
  * generator would silently have been attributed to the other.
  */
-const TOOLCHAIN_BINARIES = [
+const TOOLCHAIN_BINARY_NAMES = [
   'VC98/Bin/CL.EXE',
   'VC98/Bin/C1.DLL',
   'VC98/Bin/C1XX.DLL',
   'VC98/Bin/C2.DLL',
   'VC98/Bin/LINK.EXE',
-].map((rel) => path.join(VC98, rel));
+];
+const toolchainBinaries = (toolchain: string): ReadonlyArray<string> =>
+  TOOLCHAIN_BINARY_NAMES.map((rel) => path.join(vc98Dir(toolchain), rel));
 /** Bind-mounted into the container at /work: how a source gets in and an
  *  object gets out. */
 const EXCHANGE = path.join(TOOLCHAIN_ROOT, 'ccwork');
 const IMAGE = 'oe-cc';
-const CONTAINER = 'oe-cc-live';
+
 
 /**
  * Prepended to every source, exactly as it is for every other attempt.
@@ -123,32 +153,52 @@ export class GateImpl extends implementing(modules.Gate) implements IGate {
    * rejected it, which is a retraction of the whole proof set dressed up as
    * thousands of bad reconstructions.
    */
-  private *ensureContainer(): EffectGen<void, GateUnavailable> {
+  private *ensureContainer(toolchain: string): EffectGen<void, GateUnavailable> {
+    const container = containerFor(toolchain);
+    const want = vc98Dir(toolchain);
+    // The mount is CHECKED, not assumed. This returned early on nothing but
+    // the container's name and running state, so a container holding one
+    // toolchain would happily serve compiles attributed to another -- the
+    // bytes hashed from one install, the code emitted by the other, and no
+    // error anywhere. A harness has to name its subject.
     const running = yield* this.docker([
       'inspect',
       '-f',
-      '{{.State.Running}}',
-      CONTAINER,
+      '{{.State.Running}}{{range .Mounts}} {{.Source}}->{{.Destination}}{{end}}',
+      container,
     ]);
-    if (running.stdout.trim() === 'true') return;
+    if (running.stdout.trim().startsWith('true')) {
+      const mounted = running.stdout.includes(`${want}->/vc98`);
+      if (mounted) return;
+      return yield* new GateUnavailable({
+        stage: 'container',
+        reason:
+          `${container} is running but does not have ${want} mounted at /vc98 ` +
+          `(it has: ${running.stdout.trim().slice(5).trim() || 'nothing'}). ` +
+          'Compiling through it would attribute this toolchain\'s identity to ' +
+          "another install's output. Remove that container and let it be recreated.",
+      });
+    }
 
-    if (!fs.existsSync(CL_EXE)) {
+    if (!fs.existsSync(clExe(toolchain))) {
       return yield* new GateUnavailable({
         stage: 'toolchain',
-        reason: `no cl.exe at ${CL_EXE}; set DECOMP_TOOLCHAIN to the directory holding vc98/`,
+        reason:
+          `no cl.exe at ${clExe(toolchain)}; DECOMP_TOOLCHAIN must point at a ` +
+          `directory containing ${toolchain}/VC98/Bin/CL.EXE`,
       });
     }
     // Remove only a container that EXISTS and is dead. An unconditional
     // removal can delete one another agent created and populated a moment
     // ago, which costs that agent its prefix and the next 33 seconds.
-    if (running.code === 0) yield* this.docker(['rm', '-f', CONTAINER]);
+    if (running.code === 0) yield* this.docker(['rm', '-f', container]);
     const started = yield* this.docker([
       'run',
       '-d',
       '--name',
-      CONTAINER,
+      container,
       '-v',
-      `${VC98}:/vc98:ro`,
+      `${want}:/vc98:ro`,
       '-v',
       `${EXCHANGE}:/work`,
       IMAGE,
@@ -160,11 +210,11 @@ export class GateImpl extends implementing(modules.Gate) implements IGate {
       // Another caller -- a concurrent attempt here, or the Python tooling
       // sharing this container -- may have won the race to create it. What
       // matters is whether it is running now, not who started it.
-      const again = yield* this.docker(['inspect', '-f', '{{.State.Running}}', CONTAINER]);
+      const again = yield* this.docker(['inspect', '-f', '{{.State.Running}}', container]);
       if (again.stdout.trim() === 'true') return;
       return yield* new GateUnavailable({
         stage: 'container',
-        reason: `could not start ${CONTAINER} from image ${IMAGE}: ${lastLine(started.stderr)}`,
+        reason: `could not start ${container} from image ${IMAGE}: ${lastLine(started.stderr)}`,
       });
     }
     // mspdb60.dll lives in Common/MSDev98/Bin; without it cl.exe dies with a
@@ -176,7 +226,7 @@ export class GateImpl extends implementing(modules.Gate) implements IGate {
       'cp -a /vc98/VC98/*   /prefix/drive_c/VC98/',
       'cp -a /vc98/Common/* /prefix/drive_c/Common/',
     ].join('\n');
-    const prepared = yield* this.docker(['exec', CONTAINER, 'bash', '-c', setup]);
+    const prepared = yield* this.docker(['exec', container, 'bash', '-c', setup]);
     if (prepared.code !== 0) {
       return yield* new GateUnavailable({
         stage: 'container',
@@ -208,10 +258,14 @@ export class GateImpl extends implementing(modules.Gate) implements IGate {
    * supervisor's own health probe. Requests now queue, so a burst costs
    * latency instead of availability.
    */
-  private *compile(source: string, flags: string): EffectGen<Compilation, GateUnavailable> {
+  private *compile(
+    source: string,
+    flags: string,
+    toolchain: string = DEFAULT_TOOLCHAIN,
+  ): EffectGen<Compilation, GateUnavailable> {
     yield* Effect.promise(() => acquireCompileSlot());
     try {
-      return yield* this.compileUnthrottled(source, flags);
+      return yield* this.compileUnthrottled(source, flags, toolchain);
     } finally {
       // However this ends -- success, compiler failure, or an interrupted
       // fiber -- the permit goes back. A leaked permit deadlocks the gate
@@ -223,8 +277,10 @@ export class GateImpl extends implementing(modules.Gate) implements IGate {
   private *compileUnthrottled(
     source: string,
     flags: string,
+    toolchain: string = DEFAULT_TOOLCHAIN,
   ): EffectGen<Compilation, GateUnavailable> {
-    yield* this.ensureContainer();
+    yield* this.ensureContainer(toolchain);
+    const container = containerFor(toolchain);
     const tag = crypto.randomUUID().replaceAll('-', '').slice(0, 8);
     const bytes = new TextEncoder().encode(source);
     const sourcePath = path.join(EXCHANGE, `in-${tag}.cpp`);
@@ -261,13 +317,13 @@ export class GateImpl extends implementing(modules.Gate) implements IGate {
       `wine 'C:\\VC98\\Bin\\CL.EXE' /c ${flags} /I 'C:\\VC98\\Include' in-${tag}.cpp` +
       ` > /work/build-${tag}.log 2>&1; ` +
       `echo "status=$? size=$(stat -c%s in-${tag}.obj 2>/dev/null || echo 0)" >> /work/build-${tag}.log`;
-    yield* this.docker(['exec', CONTAINER, 'bash', '-c', build]);
+    yield* this.docker(['exec', container, 'bash', '-c', build]);
     // A separate step on purpose: folding the copy onto the end of the compile
     // made the escaping fragile enough that the object was built and then
     // silently not copied out.
     yield* this.docker([
       'exec',
-      CONTAINER,
+      container,
       'bash',
       '-c',
       `cp /prefix/drive_c/b-${tag}/in-${tag}.obj /work/out-${tag}.obj 2>/dev/null; ` +
@@ -332,7 +388,10 @@ export class GateImpl extends implementing(modules.Gate) implements IGate {
     return read.success;
   }
 
-  *toolchain(flags: string): EffectGen<Toolchain, GateUnavailable> {
+  *toolchain(
+    flags: string,
+    install: string = DEFAULT_TOOLCHAIN,
+  ): EffectGen<Toolchain, GateUnavailable> {
     // Hashed over the WHOLE set, in a fixed order, each file's bytes preceded
     // by its name so that a rename cannot produce the same digest as a
     // reorder. A missing file fails loudly: an identity computed over
@@ -341,7 +400,7 @@ export class GateImpl extends implementing(modules.Gate) implements IGate {
     const clSha256 = yield* Effect.tryPromise({
       try: async () => {
         const hasher = new Bun.CryptoHasher('sha256');
-        for (const file of TOOLCHAIN_BINARIES) {
+        for (const file of toolchainBinaries(install)) {
           hasher.update(`${path.basename(file)}\n`);
           hasher.update(await Bun.file(file).bytes());
         }
@@ -351,8 +410,8 @@ export class GateImpl extends implementing(modules.Gate) implements IGate {
         new GateUnavailable({
           stage: 'toolchain',
           reason:
-            `cannot hash the toolchain binaries under ${VC98} ` +
-            `(${TOOLCHAIN_BINARIES.map((f) => path.basename(f)).join(', ')}): ${reason(cause)}`,
+            `cannot hash the toolchain binaries under ${vc98Dir(install)} ` +
+            `(${TOOLCHAIN_BINARY_NAMES.join(', ')}): ${reason(cause)}`,
         }),
     });
     const id = `${clSha256}:${flags}`;
@@ -361,7 +420,7 @@ export class GateImpl extends implementing(modules.Gate) implements IGate {
 
     // The stamp is read out of an object this compiler actually produced, so
     // the identity is a fact about emitted bytes rather than about an install.
-    const probe = yield* this.compile(`${PROLOGUE}int probe(int a) { return a + 1; }\n`, flags);
+    const probe = yield* this.compile(`${PROLOGUE}int probe(int a) { return a + 1; }\n`, flags, install);
     if (!probe.built) {
       return yield* new GateUnavailable({
         stage: 'toolchain',
@@ -383,14 +442,18 @@ export class GateImpl extends implementing(modules.Gate) implements IGate {
   }
 
   *contribute(attempt: GateAttempt): EffectGen<Contribution, GateUnavailable> {
-    const toolchain = yield* this.toolchain(attempt.flags);
+    // One install for the identity, the compile and the retry. Reading it
+    // once means a verdict cannot be hashed against one compiler and emitted
+    // by another.
+    const install = attempt.toolchain ?? DEFAULT_TOOLCHAIN;
+    const toolchain = yield* this.toolchain(attempt.flags, install);
     const source = PROLOGUE + attempt.source;
 
     // One retry. Under many concurrent agents the shared container
     // occasionally hands back an object with no code, and a transient failure
     // reported as a defect sends someone hunting a bug that is not there.
-    let compilation = yield* this.compile(source, attempt.flags);
-    if (!compilation.built) compilation = yield* this.compile(source, attempt.flags);
+    let compilation = yield* this.compile(source, attempt.flags, install);
+    if (!compilation.built) compilation = yield* this.compile(source, attempt.flags, install);
     if (!compilation.built) {
       return {
         verdict: {

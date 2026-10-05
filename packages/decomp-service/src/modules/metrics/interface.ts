@@ -105,6 +105,42 @@ export interface InventoryHealth {
   }>;
 }
 
+/**
+ * What is standing between here and a browser build, as counted facts.
+ *
+ * Every other figure says what has been achieved. These say what has not, and
+ * why -- which is the only input to deciding what to do next. Each carries the
+ * size of the thing blocked, because a blocker holding 250KB of the game and
+ * one holding 150 bytes are not the same problem however similar they look.
+ */
+export interface Blockers {
+  /** Functions parked with a stated cause, worst first by bytes held. */
+  readonly parked: ReadonlyArray<{
+    readonly cause: string;
+    readonly functions: number;
+    readonly bytes: number;
+  }>;
+  /** Parked with NO stated cause. These cannot be aggregated at all, so they
+   *  are invisible to any decision about what to build next. */
+  readonly parkedWithoutCause: number;
+  /** Executable bytes no discovery rule can reach, because every rule follows
+   *  a reference and nothing refers to these. */
+  readonly unfoundCodeBytes: number;
+  readonly unfoundCodeStretches: number;
+  /** Inventory entries whose recorded extent does not decode, so no agent can
+   *  read them. */
+  readonly undecodableEntries: number;
+  /** Import slots no memory capture has ever caught a call through. Each is a
+   *  Windows function the browser build cannot yet name. */
+  readonly unansweredImportSlots: number;
+  readonly importSlotsTotal: number;
+  /** Pointers stored inside the data region that cannot be placed inside a
+   *  variable whose extent is settled. The browser build has to resolve every
+   *  one of them. */
+  readonly unattributedDataPointers: number;
+  readonly dataPointersTotal: number;
+}
+
 export interface IMetrics {
   phase2(): EffectGen<Phase2, DbError>;
   lastGateRun(): EffectGen<Option.Option<GateRun>, DbError>;
@@ -140,6 +176,9 @@ export interface IMetrics {
    * than that.
    */
   inventoryHealth(): EffectGen<InventoryHealth, DbError>;
+
+  /** What is blocking the browser build, counted rather than described. */
+  blockers(): EffectGen<Blockers, DbError>;
 
   /**
    * The current working note, and when it was written.

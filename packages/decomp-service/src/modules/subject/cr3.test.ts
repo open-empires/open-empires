@@ -40,12 +40,37 @@ const expectBytes = image.bytes.slice(0, 4096);
  */
 const ramOf = (p: string): Uint8Array => Bun.mmap(p, { shared: false });
 
-test('the scan rediscovers the known CR3 without being told it', () => {
+/**
+ * Each dump is scanned ONCE and the result shared.
+ *
+ * A scan without a hint has to read a dword out of every page-aligned frame,
+ * which touches all 512MB of the mapping. Three tests scanning the same dump
+ * did that three times and intermittently failed the suite on timing alone --
+ * not because the answer was ever wrong, but because the work was repeated.
+ * The service never pays this in production: it passes the recorded root as a
+ * hint, which costs one attempt.
+ */
+const scans = new Map<string, ReturnType<typeof GuestMemory.locate>>();
+const scanOnce = (
+  file: string,
+  expect: Uint8Array,
+  hint?: number,
+): ReturnType<typeof GuestMemory.locate> => {
+  const key = `${file}:${expect.length}:${hint ?? 'none'}`;
+  const seen = scans.get(key);
+  if (seen !== undefined) return seen;
   const found = GuestMemory.locate({
-    ram: ramOf(GUEST_RAM_PATH),
+    ram: ramOf(file),
     probeVa: image.imageBase,
-    expect: expectBytes,
+    expect,
+    hint,
   });
+  scans.set(key, found);
+  return found;
+};
+
+test('the scan rediscovers the known CR3 without being told it', () => {
+  const found = scanOnce(GUEST_RAM_PATH, expectBytes);
   expect(found._tag).toBe('Located');
   if (found._tag !== 'Located') return;
   expect(found.cr3).toBe(GUEST_CR3);
@@ -55,11 +80,7 @@ test('a 16-byte probe is ambiguous, and says so rather than choosing', () => {
   // The reason the probe is a page. Eight processes map the image, and all
   // eight reproduce an MZ header; picking the first would read per-process
   // state from the wrong process while the code looked perfectly right.
-  const found = GuestMemory.locate({
-    ram: ramOf(GUEST_RAM_PATH),
-    probeVa: image.imageBase,
-    expect: image.bytes.slice(0, 16),
-  });
+  const found = scanOnce(GUEST_RAM_PATH, image.bytes.slice(0, 16));
   expect(found._tag).toBe('Ambiguous');
 });
 
@@ -68,12 +89,7 @@ test('a wrong hint does not win over the real answer', () => {
   // checked, a stale constant silently decides which process is read -- and
   // a dump holds nine processes, so reading the wrong one is not an error
   // that announces itself.
-  const found = GuestMemory.locate({
-    ram: ramOf(GUEST_RAM_PATH),
-    probeVa: image.imageBase,
-    expect: expectBytes,
-    hint: 0x1000,
-  });
+  const found = scanOnce(GUEST_RAM_PATH, expectBytes, 0x1000);
   expect(found._tag).toBe('Located');
   if (found._tag !== 'Located') return;
   expect(found.cr3).toBe(GUEST_CR3);
@@ -84,11 +100,7 @@ const SECOND = path.join(path.dirname(GUEST_RAM_PATH), 'guest-ram-2.bin');
 test.skipIf(!fs.existsSync(SECOND))(
   'the second dump yields a CR3 that reproduces the subject',
   () => {
-    const found = GuestMemory.locate({
-      ram: ramOf(SECOND),
-      probeVa: image.imageBase,
-      expect: expectBytes,
-    });
+    const found = scanOnce(SECOND, expectBytes);
     // Reported either way: a dump that cannot be mapped unambiguously is a
     // finding about that capture, not a reason to fail the suite.
     if (found._tag !== 'Located') {

@@ -327,6 +327,9 @@ export class WorkImpl
     va: number,
     source: string,
     flags: string,
+    /** Which compiler install proved it. A proof is only a proof under the
+     *  compiler that made it, and the subject was built by two. */
+    install?: string,
   ): EffectGen<Verdict, SubmitFailure> {
     const db = this.dependencies.Db;
     const gate = this.dependencies.Gate;
@@ -347,7 +350,10 @@ export class WorkImpl
     // newest run regardless of flags recorded every /O1 proof against the
     // /O2 toolchain -- 8 of them -- which is the prover identity the whole
     // schema exists to keep honest.
-    const toolchain = yield* gate.toolchain(bucket);
+    // The SAME install the compile used. Recording the default here while
+    // compiling with another would attribute the proof to a compiler that
+    // never saw it -- the exact failure the identity work exists to prevent.
+    const toolchain = yield* gate.toolchain(bucket, install);
     yield* db.run(
       `INSERT INTO toolchains(id, cl_sha256, flags, comp_id, added_at)
        VALUES (?,?,?,?,?) ON CONFLICT(id) DO NOTHING`,
@@ -490,6 +496,7 @@ export class WorkImpl
     va: number,
     source: string,
     flagSets: ReadonlyArray<string>,
+    install?: string,
   ): EffectGen<SweepReport, SubmitFailure> {
     const gate = this.dependencies.Gate;
     const { size, original } = yield* this.claimed(agentId, va);
@@ -502,7 +509,7 @@ export class WorkImpl
       // Sequential on purpose. A sweep is a diagnostic one agent asked for,
       // and letting it take the whole container in parallel would stall every
       // other agent's submissions behind it.
-      const v = yield* gate.check({ va, original, source, flags });
+      const v = yield* gate.check({ va, original, source, flags, toolchain: install });
       outcomes.push({
         flags,
         compiled: v.compiled,
@@ -545,7 +552,7 @@ export class WorkImpl
     let comparison: SweepComparison | undefined;
     if (best !== undefined) {
       const contribution = yield* gate.contribute({
-        va, original, source, flags: best.flags,
+        va, original, source, flags: best.flags, toolchain: install,
       });
       if (Option.isSome(contribution.entry)) {
         const emitted = contribution.entry.value;
@@ -613,6 +620,7 @@ export class WorkImpl
     va: number,
     source: string,
     flags: string,
+    toolchain?: string,
   ): EffectGen<Verdict, SubmitFailure> {
     const db = this.dependencies.Db;
     const gate = this.dependencies.Gate;
@@ -628,7 +636,9 @@ export class WorkImpl
     if (Option.isNone(original)) return yield* Effect.fail(new UnknownFunction({ va }));
 
     const bucket = flags === SUBJECT_FLAGS_O1 ? SUBJECT_FLAGS_O1 : SUBJECT_FLAGS;
-    const v = yield* gate.check({ va, original: original.value, source, flags: bucket });
+    const v = yield* gate.check({
+      va, original: original.value, source, flags: bucket, toolchain,
+    });
     const atEntry = v.exact && Option.getOrElse(v.matchedAt, () => 0) === 0;
 
     // The replacement must stand on its own. A source that does not reproduce

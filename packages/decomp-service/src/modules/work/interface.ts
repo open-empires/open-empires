@@ -205,7 +205,7 @@ export interface IWork {
 
   /** Submit source for a claimed function. The service compiles it and
    *  returns the verdict; the agent never runs the compiler. */
-  submit(agentId: string, va: number, source: string, flags: string):
+  submit(agentId: string, va: number, source: string, flags: string, install?: string):
     EffectGen<Verdict, SubmitFailure>;
 
   /**
@@ -227,8 +227,15 @@ export interface IWork {
    * sweep is the easiest way to spend it on an address another agent already
    * holds.
    */
-  sweep(agentId: string, va: number, source: string, flagSets: ReadonlyArray<string>):
-    EffectGen<SweepReport, SubmitFailure>;
+  sweep(
+    agentId: string,
+    va: number,
+    source: string,
+    flagSets: ReadonlyArray<string>,
+    /** Which compiler install. The subject was built by two -- 306 objects
+     *  from build 8447 and 169 from 8168 -- so a sweep can ask either. */
+    install?: string,
+  ): EffectGen<SweepReport, SubmitFailure>;
 
   /**
    * Replace the stored source of an ALREADY-PROVEN function.
@@ -244,7 +251,7 @@ export interface IWork {
    * and the caller is told. So this can improve the record and can never
    * launder a worse one into it.
    */
-  amend(agentId: string, va: number, source: string, flags: string):
+  amend(agentId: string, va: number, source: string, flags: string, toolchain?: string):
     EffectGen<Verdict, SubmitFailure>;
 
   /** Record a diagnosed near-miss and give the lease back. */

@@ -32,6 +32,17 @@ interface Status {
     pointers: { target: string; enumerated: number; attributed: number }[];
     byEvidence: { evidence: string; globals: number }[];
   };
+  blockers: {
+    parked: { cause: string; functions: number; bytes: number }[];
+    parkedWithoutCause: number;
+    unfoundCodeBytes: number;
+    unfoundCodeStretches: number;
+    undecodableEntries: number;
+    unansweredImportSlots: number;
+    importSlotsTotal: number;
+    unattributedDataPointers: number;
+    dataPointersTotal: number;
+  };
   /** Prose, written by whoever is working. Null until the first note. */
   workingOn: { note: string; updatedAt: number } | null;
   inventory: {
@@ -327,6 +338,80 @@ export default function Page() {
             ))}
           </div>
         )}
+      </Section>
+
+      <Section
+        title="Risks, blockers and bottlenecks"
+        explain={
+          <>
+            Every other figure on this page says what has been achieved. These say
+            what has not, and why, which is the only thing that decides what to do
+            next. Each carries the size of what it holds up, because{' '}
+            <strong>a blocker sitting on a quarter of a megabyte of the game and one
+            sitting on a hundred bytes are not the same problem</strong>, however
+            alike they read. All of it is counted from the record rather than
+            written by hand, so none of it can quietly go out of date.
+          </>
+        }
+      >
+        <div className="grid">
+          <Card
+            label="code we cannot find"
+            value={f(s.blockers.unfoundCodeBytes)}
+            stale={s.blockers.unfoundCodeBytes > 0}
+            prov={`bytes, in ${f(s.blockers.unfoundCodeStretches)} stretches between known routines. Every way we have of finding routines follows a reference from somewhere else, so a routine nothing refers to cannot be found at all. Needs a different method, not more of the same`}
+          />
+          <Card
+            label="Windows calls still unnamed"
+            value={`${f(s.blockers.unansweredImportSlots)} / ${f(s.blockers.importSlotsTotal)}`}
+            stale={s.blockers.unansweredImportSlots > 0}
+            prov="slots the copy protection has never filled in, because the game has not called through them in any recording we have taken. Playing further no longer reaches them — they are error and edge paths, so they must be read out of the code that calls them"
+          />
+          <Card
+            label="stored pointers unresolved"
+            value={`${f(s.blockers.unattributedDataPointers)} / ${f(s.blockers.dataPointersTotal)}`}
+            stale={s.blockers.unattributedDataPointers > 0}
+            prov="pointers inside the game's data that we cannot yet place inside a variable of known extent. The browser build has to resolve every one. This only closes as more routines are rebuilt — there is no shortcut"
+          />
+          <Card
+            label="routines nobody can read"
+            value={f(s.blockers.undecodableEntries)}
+            stale={s.blockers.undecodableEntries > 0}
+            prov="entries whose recorded length does not decode, so whoever picks one up gets no readable body. Each is either a length that cuts an instruction in half or a routine ending in a switch table"
+          />
+        </div>
+
+        <p className="explain">
+          Routines that were attempted, got close, and were set aside — grouped by
+          what stopped them, largest first by how much of the game they hold. A
+          cause shared by several is worth solving once:
+        </p>
+        <table style={{ marginTop: 10 }}>
+          <tbody>
+            <tr>
+              <th>what stopped it</th>
+              <th className="r">routines</th>
+              <th className="r">bytes</th>
+            </tr>
+            {s.blockers.parked.slice(0, 8).map((b) => (
+              <tr key={b.cause}>
+                <td className="mut">{b.cause}</td>
+                <td className="r">{f(b.functions)}</td>
+                <td className="r">{f(b.bytes)}</td>
+              </tr>
+            ))}
+            {s.blockers.parkedWithoutCause > 0 ? (
+              <tr>
+                <td className="mut stale">
+                  set aside with no stated cause — cannot be grouped, so invisible to
+                  any decision about what to fix
+                </td>
+                <td className="r">{f(s.blockers.parkedWithoutCause)}</td>
+                <td className="r">—</td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
       </Section>
 
       <Section

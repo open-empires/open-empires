@@ -4,7 +4,7 @@ import { modules } from '../index';
 import type { DbError } from '../db/interface';
 import type {
   Composition, Counted, GateRun, IMetrics, ImportSurface,
-  InventoryHealth, Phase2, SeriesPoint, SymbolMap,
+  Blockers, InventoryHealth, Phase2, SeriesPoint, SymbolMap,
 } from './interface';
 
 const num = (v: unknown): number => (typeof v === 'number' ? v : Number(v ?? 0));
@@ -240,6 +240,54 @@ export class MetricsImpl
                                           updated_at = excluded.updated_at`,
       [note, Date.now() / 1000],
     );
+  }
+
+  *blockers(): EffectGen<Blockers, DbError> {
+    const db = this.dependencies.Db;
+
+    const parked = (yield* db.all(
+      `SELECT m.blocked_class AS cause, COUNT(*) AS functions,
+              COALESCE(SUM(f.size), 0) AS bytes
+         FROM near_misses m JOIN functions f ON f.va = m.va
+        WHERE m.blocked_class IS NOT NULL AND TRIM(m.blocked_class) <> ''
+        GROUP BY m.blocked_class
+        ORDER BY bytes DESC`,
+    )) as ReadonlyArray<Record<string, unknown>>;
+
+    const row = (yield* db.one(
+      `SELECT
+         (SELECT COUNT(*) FROM near_misses
+            WHERE blocked_class IS NULL OR TRIM(blocked_class) = '')      AS no_cause,
+         (SELECT COALESCE(residue_bytes, 0) FROM gap_scans
+           ORDER BY at DESC LIMIT 1)                                      AS unfound_bytes,
+         (SELECT COALESCE(residue_gaps, 0) FROM gap_scans
+           ORDER BY at DESC LIMIT 1)                                      AS unfound_gaps,
+         (SELECT COALESCE(undecodable, 0) FROM inventory_audits
+           ORDER BY at DESC LIMIT 1)                                      AS undecodable,
+         (SELECT COUNT(*) FROM import_slots
+           WHERE resolution = 'no-cached-call-site')                      AS unanswered_slots,
+         (SELECT COUNT(*) FROM import_slots)                              AS slots_total,
+         (SELECT COALESCE(SUM(enumerated - attributed), 0)
+            FROM globals_pointer_coverage WHERE target = 'data')          AS unattributed_ptrs,
+         (SELECT COALESCE(SUM(enumerated), 0)
+            FROM globals_pointer_coverage WHERE target = 'data')          AS ptrs_total`,
+    )) as Record<string, unknown> | null;
+
+    return {
+      parked: parked.map((r) => ({
+        cause: String(r.cause),
+        functions: num(r.functions),
+        bytes: num(r.bytes),
+      })),
+      parkedWithoutCause: num(row?.no_cause),
+      unfoundCodeBytes: num(row?.unfound_bytes),
+      unfoundCodeStretches: num(row?.unfound_gaps),
+      undecodableEntries: num(row?.undecodable),
+      unansweredImportSlots: num(row?.unanswered_slots),
+      importSlotsTotal: num(row?.slots_total),
+      unattributedDataPointers: num(row?.unattributed_ptrs),
+      dataPointersTotal: num(row?.ptrs_total),
+    };
   }
 
   *inventoryHealth(): EffectGen<InventoryHealth, DbError> {
