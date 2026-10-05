@@ -205,6 +205,27 @@ export class MetricsImpl
     return { depth: num(r?.depth), claimed: num(r?.claimed) };
   }
 
+  *workingOn(): EffectGen<
+    Option.Option<{ readonly note: string; readonly updatedAt: number }>,
+    DbError
+  > {
+    const row = (yield* this.dependencies.Db.one(
+      'SELECT note, updated_at FROM working_on WHERE only_row = 1',
+    )) as { note: string; updated_at: number } | null;
+    return row === null
+      ? Option.none()
+      : Option.some({ note: row.note, updatedAt: num(row.updated_at) });
+  }
+
+  *setWorkingOn(note: string): EffectGen<void, DbError> {
+    yield* this.dependencies.Db.run(
+      `INSERT INTO working_on(only_row, note, updated_at) VALUES (1,?,?)
+       ON CONFLICT(only_row) DO UPDATE SET note = excluded.note,
+                                          updated_at = excluded.updated_at`,
+      [note, Date.now() / 1000],
+    );
+  }
+
   *inventoryHealth(): EffectGen<InventoryHealth, DbError> {
     const db = this.dependencies.Db;
     // Newest audit for the subject in force. Joining current_config rather

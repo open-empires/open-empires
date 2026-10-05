@@ -169,3 +169,20 @@ svg { display: block; width: 100%; height: auto; overflow: visible; }
   .wrap { padding: 18px 14px 56px; }
   .big { font-size: 19px; }
 }
+
+/* The working note. Prose, so it gets a readable measure rather than the
+   dense figures the cards use. */
+.note {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 14px 16px;
+  background: var(--panel);
+}
+.notepara {
+  margin: 10px 0 0;
+  max-width: 78ch;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--fg);
+}
+.notepara:first-of-type { margin-top: 8px; }

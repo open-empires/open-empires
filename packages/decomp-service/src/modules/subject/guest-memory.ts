@@ -65,6 +65,94 @@ export class GuestMemory {
     return Option.none();
   }
 
+  /**
+   * Find BOTH the page-directory root and the paging mode, by reproducing
+   * bytes already known to be at `probeVa`.
+   *
+   * `detect` pins the mode this way but takes CR3 on trust, so CR3 was a
+   * hand-recorded constant -- 0x1624d000 for the first dump. That makes every
+   * new dump a code change, and it left the second dump unusable: it was
+   * captured specifically to exercise the 54 import slots the copy protection
+   * had not yet recorded, and nothing could read it because nobody knew its
+   * CR3.
+   *
+   * THE PROBE HAS TO BE BIG. A dump holds nine processes and the game image
+   * is mapped in eight of them, so the first 16 bytes -- an MZ header
+   * identical in every one -- admit EIGHT candidate roots. Measured on the
+   * known dump: 16 bytes leaves 8 candidates, 4KB leaves exactly one, and
+   * that one is the value that had been recorded by other means. Pass at
+   * least a page.
+   *
+   * Ambiguity is reported, never resolved by picking the first. Reading the
+   * wrong process still yields the right CODE -- the image is identical --
+   * while yielding the wrong per-process state, and the import cache this
+   * exists to read is exactly that kind of state. A wrong answer here looks
+   * entirely correct.
+   */
+  static locate(input: {
+    readonly ram: Uint8Array;
+    readonly probeVa: number;
+    readonly expect: Uint8Array;
+    /** Tried first, so a known dump costs one attempt instead of a scan. It
+     *  must still satisfy the probe; a stale constant does not get to win. */
+    readonly hint?: number;
+  }):
+    | { readonly _tag: 'Located'; readonly cr3: number; readonly memory: GuestMemory }
+    | { readonly _tag: 'Ambiguous'; readonly candidates: ReadonlyArray<number> }
+    | { readonly _tag: 'NotFound' } {
+    const attempt = (cr3: number): Option.Option<GuestMemory> =>
+      GuestMemory.detect({
+        ram: input.ram,
+        cr3,
+        probeVa: input.probeVa,
+        expect: input.expect,
+      });
+
+    if (input.hint !== undefined) {
+      const hinted = attempt(input.hint);
+      if (Option.isSome(hinted)) {
+        return { _tag: 'Located', cr3: input.hint, memory: hinted.value };
+      }
+    }
+
+    // TWO STAGES. The full probe is a page, and reading a page through a
+    // candidate's page tables allocates; doing that for all 131,072
+    // page-aligned candidates in a 512MB image made this the most expensive
+    // thing in the test suite and intermittently exhausted it.
+    //
+    // Matching the first 16 bytes is a NECESSARY condition for matching the
+    // page, because those 16 bytes are part of it. So the cheap probe rejects
+    // everything but a handful -- eight, on the known dump, being the eight
+    // processes that map the image -- and only those are asked the question
+    // that actually discriminates. Same answer, a fraction of the work.
+    const cheap = input.expect.subarray(0, Math.min(16, input.expect.length));
+    const shortlist: number[] = [];
+    for (let cr3 = 0; cr3 + 0x1000 <= input.ram.length; cr3 += 0x1000) {
+      const rough = GuestMemory.detect({
+        ram: input.ram,
+        cr3,
+        probeVa: input.probeVa,
+        expect: cheap,
+      });
+      if (Option.isSome(rough)) shortlist.push(cr3);
+    }
+
+    const candidates: number[] = [];
+    let first: GuestMemory | undefined;
+    for (const cr3 of shortlist) {
+      const found = attempt(cr3);
+      if (Option.isNone(found)) continue;
+      candidates.push(cr3);
+      first ??= found.value;
+      // Two is already too many to choose between; stop rather than scan on.
+      if (candidates.length > 1) return { _tag: 'Ambiguous', candidates };
+    }
+    if (candidates.length === 1 && first !== undefined) {
+      return { _tag: 'Located', cr3: candidates[0]!, memory: first };
+    }
+    return { _tag: 'NotFound' };
+  }
+
   // ------------------------------------------------------------- physical
 
   private phys(address: number, length: number): Option.Option<Uint8Array> {

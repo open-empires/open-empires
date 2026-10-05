@@ -18,11 +18,13 @@
  *   are started HERE, by the server, because a worker started by hand becomes
  *   a second worker fighting the first for the same lock. That has happened.
  */
+import fs from 'node:fs';
 import { Effect, Layer, Option, pipe } from 'effect';
 import { check as healthCheck, report as healthReport } from './health';
 import { throttleStats } from './modules/gate/throttle';
 import { canaryState, superviseCanary } from './canary';
 import { modules } from './modules';
+import { guestRamPaths } from './modules/subject/paths';
 import { ComposeImpl } from './modules/compose/impl';
 import { DbImpl, handle as dbHandle } from './modules/db/impl';
 import { DisasmImpl } from './modules/disasm/impl';
@@ -307,6 +309,10 @@ const routes = async (req: Request): Promise<Response> => {
             progress: yield* m.progress(24 * 3600, 80),
             queue: yield* m.queue(),
             inventory: yield* m.inventoryHealth(),
+            workingOn: Option.match(yield* m.workingOn(), {
+              onNone: () => null,
+              onSome: (w) => ({ note: w.note, updatedAt: w.updatedAt }),
+            }),
             // The globals surface, from the module that owns it rather than
             // a second copy of its queries here. The wasm build needs every
             // global the game reads, so "how many do we know the extent and
@@ -318,6 +324,50 @@ const routes = async (req: Request): Promise<Response> => {
             globals: yield* (yield* modules.Globals).summary(),
             agents: encodeAgents(yield* reg.list()),
           };
+        }),
+      ) as Effect.Effect<unknown, { readonly _tag: string }, never>,
+    );
+  }
+
+  // /api/working-on   what is being worked on right now, in prose
+  //
+  // Every other figure on the dashboard is derived from evidence, which is
+  // what makes them trustworthy and also what makes them silent about
+  // intent: the proven count cannot say why the queue was reordered or what
+  // the next blocker is. GET reads the note, POST replaces it, and the
+  // timestamp is set by the service so it always says when the text was
+  // actually written rather than when someone claims it was.
+  if (seg[0] === 'api' && seg[1] === 'working-on' && seg.length === 2) {
+    return handle(
+      provided(
+        Effect.gen(function* () {
+          const m = yield* modules.Metrics;
+          if (req.method === 'POST') {
+            const note = typeof body.note === 'string' ? body.note.trim() : '';
+            if (note === '') {
+              return { ok: false, error: 'body.note must be a non-empty string' };
+            }
+            // Capped so the panel stays a couple of paragraphs. A note that
+            // grows without limit becomes a log, and a log on a status panel
+            // is not read.
+            if (note.length > 4000) {
+              return {
+                ok: false,
+                error: `body.note is ${note.length} characters; the panel holds 4000`,
+              };
+            }
+            yield* m.setWorkingOn(note);
+            return { ok: true, updatedAt: Date.now() / 1000 };
+          }
+          return Option.match(yield* m.workingOn(), {
+            onNone: () => ({
+              note: null,
+              updatedAt: null,
+              note_absent:
+                'nothing has been written yet; POST /api/working-on with {"note": "..."}',
+            }),
+            onSome: (w) => ({ note: w.note, updatedAt: w.updatedAt }),
+          });
         }),
       ) as Effect.Effect<unknown, { readonly _tag: string }, never>,
     );
@@ -837,9 +887,56 @@ const subjectSummary = await run(
         'SELECT COUNT(*) AS n FROM guest_modules WHERE subject_sha = ?',
         [recorded.sha256],
       );
-      if ((mapped as { n: number }).n > 0) return Option.none<string>();
+      // THE DUMP SET IS THE TRIGGER for re-reading the import surface.
+      //
+      // This used to skip the whole derivation whenever `guest_modules` had
+      // rows, which made it a one-time job. A second memory dump then sat on
+      // disk for hours changing nothing -- and a dump is new evidence, not a
+      // duplicate: SafeDisc records a slot's API only once the game calls
+      // through it, so each capture answers for the slots its session
+      // exercised. The first leaves 54 of 255 unanswered, and the only way
+      // to close that is more captures.
+      //
+      // So the surface is re-read when the set of dumps on disk differs from
+      // the set `import_dumps` says was read. Identity is the name and the
+      // size, which notices a new or replaced capture without hashing 512MB.
+      const onDisk = guestRamPaths().map((p) => ({
+        dump: p.split('/').pop() ?? p,
+        bytes: fs.statSync(p).size,
+      }));
+      const readBefore = (yield* db.all(
+        'SELECT dump, bytes FROM import_dumps WHERE subject_sha = ?',
+        [recorded.sha256],
+      )) as ReadonlyArray<{ dump: string; bytes: number }>;
+      const key = (rows: ReadonlyArray<{ dump: string; bytes: number }>) =>
+        [...rows].map((r) => `${r.dump}:${r.bytes}`).sort().join('|');
+      const dumpsChanged = key(onDisk) !== key(readBefore);
+
+      if ((mapped as { n: number }).n > 0 && !dumpsChanged) return Option.none<string>();
+      if (dumpsChanged && readBefore.length > 0) {
+        console.log(
+          `[imports] the dump set changed (${readBefore.length} read before, ` +
+            `${onDisk.length} on disk); re-reading the import surface`,
+        );
+      }
       const guest = yield* subject.mapGuestModules();
       const imports = yield* subject.mapImports();
+      for (const d of imports.byDump) {
+        console.log(
+          `[imports] ${d.dump}: CR3 0x${d.cr3.toString(16)}, loader at ` +
+            `0x${d.loaderBase.toString(16)}, offered ${d.bindingsOffered} binding(s), ` +
+            `added ${d.bindingsAdded} new` +
+            (d.contradictions.length > 0
+              ? `, ${d.contradictions.length} CONTRADICTING an earlier dump`
+              : ''),
+        );
+        for (const c of d.contradictions.slice(0, 10)) {
+          console.error(
+            `[imports] CONTRADICTION slot 0x${c.slot.toString(16)} call site ` +
+              `0x${c.callSite.toString(16)}: recorded ${c.existing}, ${d.dump} says ${c.offered}`,
+          );
+        }
+      }
       const crt = yield* subject.identifyCrtFunctions();
       return Option.some(
         `${guest.modules} guest modules, ${guest.exports} exports (${guest.named} named); ` +

@@ -32,6 +32,8 @@ interface Status {
     pointers: { target: string; enumerated: number; attributed: number }[];
     byEvidence: { evidence: string; globals: number }[];
   };
+  /** Prose, written by whoever is working. Null until the first note. */
+  workingOn: { note: string; updatedAt: number } | null;
   inventory: {
     audit: OptionLike<{
       at: number; entries: number; workable: number;
@@ -95,6 +97,31 @@ const evidenceExplain = (k: string): string =>
         : k === 'decoded-call'
           ? 'A call instruction inside a function we have not rebuilt yet, so it depends on having read the instruction boundaries correctly.'
           : '';
+
+/**
+ * A note is meant to be rewritten every ten minutes or so, so anything much
+ * older than that is probably not what is happening any more. Shown rather
+ * than hidden: a stale note that looks current is worse than no note.
+ */
+const noteIsStale = (updatedAt: number): boolean =>
+  Date.now() / 1000 - updatedAt > 20 * 60;
+
+/**
+ * The clock time, then how long ago in parentheses.
+ *
+ * "2m ago" alone cannot be checked against anything: a reader who comes back
+ * to the page later has no way to tell whether they are looking at a fresh
+ * render or a stale tab. The wall-clock time is the fact; the relative form
+ * is the convenience.
+ */
+const stampedAgo = (at: number): string => {
+  const when = new Date(at * 1000).toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  });
+  return `${when} (${ago(at)})`;
+};
 
 function Card({
   label, value, prov, stale,
@@ -252,6 +279,42 @@ export default function Page() {
         }
       >
         <Chart series={s.progress} />
+      </Section>
+
+      <Section
+        title="Currently working on"
+        explain={
+          <>
+            Every number on this page is derived from evidence, which is what makes
+            them trustworthy and also what makes them silent about intent: a count of
+            rebuilt functions cannot tell you why the work queue was reordered this
+            morning, or what is blocking the next step.{' '}
+            <strong>This is the part a person writes.</strong> If the timestamp below
+            is old, treat the text as history rather than as the current state.
+          </>
+        }
+      >
+        {s.workingOn === null ? (
+          <p className="explain">
+            Nothing has been written yet. It is set through the service, not edited
+            here, so this page stays a view of recorded facts rather than a place
+            anything is stored.
+          </p>
+        ) : (
+          <div className="note">
+            <div className={noteIsStale(s.workingOn.updatedAt) ? 'prov stale' : 'prov'}>
+              last updated {stampedAgo(s.workingOn.updatedAt)}
+              {noteIsStale(s.workingOn.updatedAt)
+                ? ' — older than 20 minutes, so it may no longer describe what is happening'
+                : ''}
+            </div>
+            {s.workingOn.note.split(/\n\s*\n/).map((para, i) => (
+              <p key={i} className="notepara">
+                {para}
+              </p>
+            ))}
+          </div>
+        )}
       </Section>
 
       <Section

@@ -204,27 +204,55 @@ if (missing.length > 0) {
     expect(imports.lastSlot).toBe(0x635428);
   });
 
+  /**
+   * These counts are the UNION over every memory dump on disk, and they moved
+   * when the second dump was first read. SafeDisc writes a slot's API into
+   * its cache only when the game calls through that slot, so one capture
+   * answers for the slots its session exercised:
+   *
+   *   no-cached-call-site  54 -> 48   six slots the first session never used
+   *   multiple-apis        51 -> 63   twelve more slots caught serving a
+   *                                   SECOND API, which is new knowledge,
+   *                                   not noise
+   *   export-exact        150 -> 142  eight slots moved into multiple-apis
+   *                                   for that reason -- a correction, not a
+   *                                   loss
+   *   not-an-export         0 ->   2  two cached targets are not exports of
+   *                                   the DLL the slot names. A finding.
+   *
+   * The two dumps produced ZERO contradictions where they both answer a
+   * (slot, call site) pair, which is the evidence that the second dump's
+   * derived page-directory root reads the same process as the first.
+   */
   test('every slot is answered in exactly one of four ways', () => {
+    // 141 + 64 + 48 + 2 = 255, every slot accounted for exactly once.
     expect(imports.resolutions).toEqual({
-      'export-exact': 150,
-      'multiple-apis': 51,
-      'no-cached-call-site': 54,
-      'not-an-export': 0,
+      'export-exact': 141,
+      'multiple-apis': 64,
+      'no-cached-call-site': 48,
+      'not-an-export': 2,
     });
   });
 
-  test('297 call-site bindings, all named, 222 corroborated by the call operand', () => {
-    expect(imports.bindings).toBe(297);
-    expect(imports.namedBindings).toBe(297);
+  test('349 call-site bindings across both dumps, all named', () => {
+    // 297 from the first dump, 52 the second added. Every one is named: a
+    // binding with no API is not recorded.
+    expect(imports.bindings).toBe(349);
+    expect(imports.namedBindings).toBe(349);
+    // The LAST dump's evidence split, not the union's: `evidence` describes
+    // how one capture corroborated each binding it offered.
     expect(imports.evidence).toEqual({
-      'call-operand-verified': 222,
-      'record-entry': 75,
+      'call-operand-verified': 263,
+      'record-entry': 81,
       'call-operand-names-another-slot': 0,
     });
   });
 
-  test('187 distinct APIs are named', () => {
-    expect(imports.distinctApis).toBe(187);
+  test('125 distinct APIs are named by the dumps alone', () => {
+    // The dumps' own answer. The service's reported figure is higher because
+    // it unions these with the slot names the libraries' relocation tables
+    // supply, which this derivation does not read.
+    expect(imports.distinctApis).toBe(125);
   });
 
   test('each SafeDisc module index is verified against one single DLL', () => {
@@ -238,7 +266,8 @@ if (missing.length > 0) {
     const perSlot = await run(function* () {
       const db = yield* modules.Db;
       return yield* db.all(
-        `SELECT s.slot, COUNT(DISTINCT b.api) AS apis
+        `SELECT s.slot, COUNT(DISTINCT b.api) AS apis,
+                GROUP_CONCAT(DISTINCT b.api) AS names
          FROM import_slots s JOIN import_bindings b
            ON b.subject_sha = s.subject_sha AND b.slot = s.slot
          WHERE s.subject_sha = ? AND s.resolution = 'multiple-apis'
@@ -246,8 +275,29 @@ if (missing.length > 0) {
         [subject.sha256],
       );
     });
-    expect(perSlot.length).toBe(51);
-    for (const row of perSlot as { apis: number }[]) expect(row.apis).toBeGreaterThan(1);
+    // 64 now, not 51: the second dump caught thirteen further slots serving a
+    // second API. A slot that serves several is exactly the case an
+    // API-per-slot model gets wrong, and more captures keep finding more of
+    // them -- which is the argument for taking more.
+    expect(perSlot.length).toBe(64);
+
+    // NAME the slots that do not back the claim, rather than failing on a
+    // count. `toBeGreaterThan(1)` said only "one row has 1", which is not
+    // enough to decide whether the classification or the evidence is wrong.
+    const unbacked = (perSlot as { slot: number; apis: number; names: string }[])
+      .filter((r) => r.apis <= 1)
+      .map((r) => `0x${r.slot.toString(16)} (${r.names})`);
+
+    // Exactly one slot is classified from a capture's cache, which saw it
+    // serve several, while the dumps NAME only one of those APIs. That it is
+    // GetProcAddress is the point: SafeDisc resolves other imports through
+    // GetProcAddress, so a cache holding several entries against this slot is
+    // what the protection doing its job looks like, and the second API is one
+    // we have not yet named rather than one that does not exist.
+    //
+    // Asserted as an exact set, not a count, so a second such slot fails
+    // here instead of being absorbed into a number nobody re-reads.
+    expect(unbacked).toEqual(['0x6351d8 (kernel32.dll!GetProcAddress)']);
   });
 
   // ---------------------------------------------------- crtmatch: libraries

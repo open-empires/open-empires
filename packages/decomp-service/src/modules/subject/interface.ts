@@ -177,6 +177,39 @@ export interface ImportMapTotals {
   readonly moduleIndexToDll: ReadonlyArray<{ readonly moduleIndex: number; readonly dll: string }>;
 }
 
+/**
+ * The import surface across EVERY dump, which is what the service records.
+ *
+ * `ImportMapTotals` is one capture's view. This is the union, and it is a
+ * different question: SafeDisc writes a slot's API into its cache only when
+ * the game actually calls through that slot, so a single capture answers for
+ * the slots that session exercised and is silent about the rest -- the first
+ * dump leaves 54 of 255 unanswered. "Is the import surface complete" is
+ * therefore "which captures do we have, and what did each one add".
+ */
+export interface ImportSurfaceTotals extends ImportMapTotals {
+  readonly byDump: ReadonlyArray<{
+    readonly dump: string;
+    /** The page-directory root DERIVED for it, not recorded alongside it. */
+    readonly cr3: number;
+    /** SafeDisc's loader DLL moves between boots, so this is per dump too. */
+    readonly loaderBase: number;
+    readonly bindingsOffered: number;
+    /** Pairs no earlier dump had answered. The only figure that says whether
+     *  taking the capture was worth it. */
+    readonly bindingsAdded: number;
+    /** Pairs where this dump names a different API than an earlier dump
+     *  already recorded. Never silently dropped: one of the two reads is
+     *  wrong about that call site. */
+    readonly contradictions: ReadonlyArray<{
+      readonly slot: number;
+      readonly callSite: number;
+      readonly existing: string;
+      readonly offered: string;
+    }>;
+  }>;
+}
+
 export interface CrtIdentificationTotals {
   readonly sectionsPlacedUniquely: number;
   /** Refused for lack of a unique placement. An ambiguity is never guessed. */
@@ -283,7 +316,7 @@ export interface ISubject {
    * so the answer is one row per (slot, call site) and the slot alone is not a
    * key.
    */
-  mapImports(): EffectGen<ImportMapTotals, SubjectError | DbError>;
+  mapImports(): EffectGen<ImportSurfaceTotals, SubjectError | DbError>;
 
   /**
    * Identify CRT functions by placing the shipped library's own objects in the

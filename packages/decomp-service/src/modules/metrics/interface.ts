@@ -125,4 +125,19 @@ export interface IMetrics {
    * than that.
    */
   inventoryHealth(): EffectGen<InventoryHealth, DbError>;
+
+  /**
+   * The current working note, and when it was written.
+   *
+   * None when nothing has been written yet, so the page can say so rather
+   * than show an empty panel that looks like a rendering fault.
+   */
+  workingOn(): EffectGen<
+    Option.Option<{ readonly note: string; readonly updatedAt: number }>,
+    DbError
+  >;
+
+  /** Replace the working note. The timestamp is set here, not supplied, so it
+   *  always describes when the text was actually written. */
+  setWorkingOn(note: string): EffectGen<void, DbError>;
 }

@@ -1243,4 +1243,151 @@ CREATE TABLE globals_pointer_coverage (
 );
 `,
   },
+  {
+    id: '011-import-dumps',
+    sql: `
+-- Which memory dumps the import surface has been read from.
+--
+-- SafeDisc writes a slot's API into its cache only when the game actually
+-- calls through that slot, so one capture answers for the slots that session
+-- exercised and is silent about the rest: the first dump leaves 54 of 255
+-- unanswered. More captures is the only remedy, which makes a new dump NEW
+-- EVIDENCE -- and the derivation was a one-time job, gated on
+-- \`guest_modules\` being empty, so a second dump sitting on disk changed
+-- nothing. It had been there for hours.
+--
+-- These rows are the re-derivation trigger AND the report. If the set of
+-- dumps on disk differs from the set recorded here, the surface is re-read;
+-- and \`bindings_added\` is the only figure that says whether taking a
+-- capture was worth it, because a dump whose session exercised nothing new
+-- contributes nothing however large it is.
+CREATE TABLE import_dumps (
+  subject_sha      TEXT    NOT NULL REFERENCES subjects(sha256),
+  dump             TEXT    NOT NULL,   -- basename, not a full path
+  bytes            INTEGER NOT NULL,
+  -- Derived from the dump, never recorded alongside it: a hand-written CR3
+  -- made every new capture a code change.
+  cr3              INTEGER NOT NULL,
+  -- SafeDisc's loader DLL is mapped at a different base on every boot.
+  loader_base      INTEGER NOT NULL,
+  bindings_offered INTEGER NOT NULL,
+  bindings_added   INTEGER NOT NULL,
+  contradictions   INTEGER NOT NULL,
+  read_at          REAL    NOT NULL,
+  PRIMARY KEY (subject_sha, dump)
+);
+`,
+  },
+  {
+    id: '012-slot-resolution-over-all-dumps',
+    sql: `
+-- How a slot resolves, decided over ALL the evidence rather than one dump's.
+--
+-- \`buildImportMap\` classifies a slot from the cache state of the capture it
+-- is reading, which was the only scope there was while one dump was read.
+-- With several dumps unioned, reporting the LAST dump's classification beside
+-- the UNION of the bindings put two scopes in one answer: a slot came back
+-- 'multiple-apis' while the bindings recorded for it named exactly one API,
+-- because the second dump saw two cache records and the pair for the one it
+-- shared with the first dump was already recorded.
+--
+-- So the classification is a query over what is recorded, in one place:
+--
+--   no-cached-call-site  no dump ever caught a call through this slot, so
+--                        nothing names what it serves
+--   multiple-apis        the bindings name more than one API. This is the
+--                        case an API-per-slot model gets wrong, and more
+--                        captures keep finding more of them.
+--   not-an-export        exactly one API, but the address it resolved to is
+--                        not an export of any mapped module -- a finding,
+--                        never merged
+--   export-exact         exactly one API at an address that is an export
+--
+-- A library-relocation binding counts as evidence here: it names a call site
+-- from the libraries' own symbol tables, which is independent of any dump.
+CREATE VIEW import_slot_resolution AS
+SELECT s.subject_sha,
+       s.slot,
+       COUNT(b.call_site)                AS bindings,
+       COUNT(DISTINCT LOWER(b.api))      AS apis,
+       CASE
+         WHEN COUNT(b.call_site) = 0 THEN 'no-cached-call-site'
+         WHEN COUNT(DISTINCT LOWER(b.api)) > 1 THEN 'multiple-apis'
+         WHEN MAX(b.target) IS NOT NULL
+          AND NOT EXISTS (
+                SELECT 1 FROM guest_exports e
+                 WHERE e.subject_sha = s.subject_sha AND e.va = MAX(b.target))
+           THEN 'not-an-export'
+         ELSE 'export-exact'
+       END                               AS resolution
+  FROM import_slots s
+  LEFT JOIN import_bindings b
+    ON b.subject_sha = s.subject_sha AND b.slot = s.slot
+ GROUP BY s.subject_sha, s.slot;
+`,
+  },
+  {
+    id: '013-slot-resolution-aggregate-fix',
+    sql: `
+-- Migration 012's view used MAX(b.target) inside a correlated NOT EXISTS in
+-- the same CASE, which SQLite rejects at query time with "misuse of aggregate
+-- function MAX()" -- CREATE VIEW accepted it, so the fault appeared only when
+-- something read it.
+--
+-- Recreated here rather than by editing 012, because an applied migration is
+-- skipped and the edit would never run. That is not hypothetical: a trigger
+-- written into 007 after 007 had been applied silently never existed, which
+-- is why migrations now carry the hash of the text they ran from.
+--
+-- The aggregate is computed in an inner query and the CASE reads its result.
+DROP VIEW IF EXISTS import_slot_resolution;
+CREATE VIEW import_slot_resolution AS
+SELECT agg.subject_sha,
+       agg.slot,
+       agg.bindings,
+       agg.apis,
+       CASE
+         WHEN agg.bindings = 0 THEN 'no-cached-call-site'
+         WHEN agg.apis > 1 THEN 'multiple-apis'
+         WHEN agg.target IS NOT NULL
+          AND NOT EXISTS (
+                SELECT 1 FROM guest_exports e
+                 WHERE e.subject_sha = agg.subject_sha AND e.va = agg.target)
+           THEN 'not-an-export'
+         ELSE 'export-exact'
+       END AS resolution
+  FROM (
+    SELECT s.subject_sha                   AS subject_sha,
+           s.slot                          AS slot,
+           COUNT(b.call_site)              AS bindings,
+           COUNT(DISTINCT LOWER(b.api))    AS apis,
+           MAX(b.target)                   AS target
+      FROM import_slots s
+      LEFT JOIN import_bindings b
+        ON b.subject_sha = s.subject_sha AND b.slot = s.slot
+     GROUP BY s.subject_sha, s.slot
+  ) AS agg;
+`,
+  },
+  {
+    id: '014-working-on',
+    sql: `
+-- What is being worked on right now, in prose, for a person reading the
+-- dashboard.
+--
+-- Every other figure on that page is derived from evidence, which is what
+-- makes them trustworthy and also what makes them silent about intent: the
+-- proven count cannot say why the queue was reordered this morning, or what
+-- the next blocker is. This holds the sentence a person would say.
+--
+-- One row, replaced in place, with the time it was written. The timestamp is
+-- the point: a note with no age is indistinguishable from a note nobody has
+-- revisited, and a stale note is worse than none because it reads as current.
+CREATE TABLE working_on (
+  only_row   INTEGER PRIMARY KEY CHECK (only_row = 1),
+  note       TEXT    NOT NULL,
+  updated_at REAL    NOT NULL
+);
+`,
+  },
 ];

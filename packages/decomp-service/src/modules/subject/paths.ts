@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 
 /**
@@ -19,6 +20,35 @@ export const SUBJECT_IMAGE_PATH = path.join(WORK_ROOT, 'work/dump/age2_x1-decryp
 
 /** 512MB physical RAM image of the machine the subject was dumped from. */
 export const GUEST_RAM_PATH = path.join(WORK_ROOT, 'work/dump/guest-ram.bin');
+
+/**
+ * EVERY dump on disk, newest capture last.
+ *
+ * One dump is not enough evidence about the import surface and never could
+ * be. SafeDisc records a slot's API in its cache only once the game actually
+ * calls through that slot, so a capture answers for the slots the session
+ * happened to exercise and is silent about the rest -- 54 of 255 slots are
+ * unanswered by the first dump. The remedy is more captures, so the set of
+ * dumps is discovered rather than named, and a new one is picked up by
+ * existing it rather than by a code change.
+ *
+ * Each carries its OWN page-directory root and its own loader-DLL base; both
+ * move between boots and both are derived per dump.
+ */
+export const guestRamPaths = (): ReadonlyArray<string> => {
+  const dir = path.join(WORK_ROOT, 'work/dump');
+  const found = fs
+    .readdirSync(dir)
+    .filter((n) => /^guest-ram.*\.bin$/.test(n))
+    .sort()
+    .map((n) => path.join(dir, n));
+  // The canonical dump first, so a single-dump read is unchanged and the
+  // first answer for any (slot, call site) still comes from it.
+  return [
+    GUEST_RAM_PATH,
+    ...found.filter((f) => f !== GUEST_RAM_PATH),
+  ].filter((f) => fs.existsSync(f));
+};
 
 /**
  * CR3 of the process the dump was taken from. A fact about the dump, not a

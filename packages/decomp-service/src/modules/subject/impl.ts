@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { Effect, Option, Result, Schema } from 'effect';
 import { implementing, type EffectGen } from 'effective-modules';
 import { modules } from '../index';
@@ -10,6 +11,8 @@ import {
   type CrtIdentificationTotals,
   type GuestModuleTotals,
   type ImportMapTotals,
+  type SlotResolutionKey,
+  type ImportSurfaceTotals,
   type ISubject,
   type Section,
   type Subject,
@@ -35,6 +38,7 @@ import {
   CRT_SEARCH_LO,
   GUEST_CR3,
   GUEST_RAM_PATH,
+  guestRamPaths,
   SUBJECT_IMAGE_PATH,
 } from './paths';
 
@@ -46,6 +50,18 @@ const required = <A, E>(result: Result.Result<A, E>): Effect.Effect<A, E> =>
  * Map a file rather than read it. The RAM image is 512MB and only a few
  * thousand of its pages are ever touched.
  */
+/** Size on disk, which with the name identifies a capture well enough to
+ *  notice a new one without hashing 512MB. */
+const fileSize = (path: string): Effect.Effect<number, SubjectIoError> =>
+  Effect.try({
+    try: () => fs.statSync(path).size,
+    catch: (cause) =>
+      new SubjectIoError({
+        path,
+        reason: cause instanceof Error ? cause.message : String(cause),
+      }),
+  });
+
 const mapFile = (path: string): Effect.Effect<Uint8Array, SubjectIoError> =>
   Effect.try({
     try: () => Bun.mmap(path, { shared: false }),
@@ -104,33 +120,51 @@ export class SubjectImpl
     };
   }
 
-  private *openGuest(): EffectGen<
+  /** `dumpPath` defaults to the canonical dump, so every existing caller is
+   *  unchanged; the import derivation passes each dump in turn. */
+  private *openGuest(dumpPath: string = GUEST_RAM_PATH): EffectGen<
     {
       readonly memory: GuestMemory;
+      readonly cr3: number;
       readonly subject: Subject;
       readonly image: PeImage;
     },
     SubjectIoError | SubjectParseError | GuestMapError
   > {
     const loaded = yield* this.loadSubject();
-    const ram = yield* mapFile(GUEST_RAM_PATH);
-    const memory = GuestMemory.detect({
+    const ram = yield* mapFile(dumpPath);
+    // CR3 is DERIVED, with the recorded value as a hint it still has to earn.
+    // A hand-recorded root makes every new dump a code change, and that is
+    // why a second capture -- taken to exercise the 54 import slots the
+    // protection had not recorded yet -- sat unusable: nobody knew its root.
+    //
+    // The probe is a PAGE. 16 bytes of MZ header admit eight candidate roots,
+    // because eight of the nine processes in the snapshot map the game image;
+    // 4KB admits exactly one, and on the known dump that one is the value
+    // that had been recorded by other means.
+    const located = GuestMemory.locate({
       ram,
-      cr3: GUEST_CR3,
       probeVa: loaded.subject.imageBase,
-      expect: loaded.image.bytes.slice(0, 16),
+      expect: loaded.image.bytes.slice(0, 4096),
+      hint: dumpPath === GUEST_RAM_PATH ? GUEST_CR3 : undefined,
     });
-    if (Option.isNone(memory)) {
+    if (located._tag !== 'Located') {
       return yield* Effect.fail(
         new GuestMapError({
           reason:
-            `neither legacy nor PAE paging through CR3 ${hex(GUEST_CR3)} reproduces the ` +
-            `subject's first 16 bytes at ${hex(loaded.subject.imageBase)}, so nothing read ` +
-            'through either could be trusted',
+            located._tag === 'Ambiguous'
+              ? `${located.candidates.length} page-directory roots reproduce the subject's ` +
+                `first 4096 bytes at ${hex(loaded.subject.imageBase)} ` +
+                `(${located.candidates.map(hex).join(', ')}) in ${dumpPath}; the dump does ` +
+                'not say which process to read, and per-process state read from the wrong ' +
+                'one would look correct'
+              : `no page-directory root, under legacy or PAE paging, reproduces the ` +
+                `subject's first 4096 bytes at ${hex(loaded.subject.imageBase)} in ` +
+                `${dumpPath}, so nothing read through this dump could be trusted`,
         }),
       );
     }
-    return { memory: memory.value, ...loaded };
+    return { memory: located.memory, cr3: located.cr3, ...loaded };
   }
 
   private *rows<A>(
@@ -295,119 +329,306 @@ export class SubjectImpl
 
   // -------------------------------------------------------------- import map
 
-  *mapImports(): EffectGen<ImportMapTotals, SubjectError | DbError> {
-    const { memory, subject, image } = yield* this.openGuest();
-    const map = yield* required(ModuleMap.load(memory, subject.imageBase));
-    const declared = yield* required(parseImportSlots(image));
-    // SafeDisc's dispatcher and tables are addressed from the base its loader
-    // DLL is actually mapped at in THIS dump, because that base moves between
-    // boots -- 0x00CC0000 in the first dump, 0x00D40000 in the second.
-    const loader = map.moduleNamed(SAFEDISC_LOADER_DLL);
-    if (Option.isNone(loader)) {
-      return yield* Effect.fail(
-        new GuestMapError({
-          reason:
-            `${SAFEDISC_LOADER_DLL} is not in the guest's loader list, so SafeDisc's ` +
-            'redirection tables have no base to be read from',
-        }),
-      );
-    }
-    const table = yield* required(
-      RedirectTable.read(memory, loader.value.base, moduleRecordCounts(memory, loader.value.base)),
-    );
-    const imports = yield* required(
-      buildImportMap({ image, memory, moduleMap: map, table, declared }),
-    );
+  *mapImports(): EffectGen<ImportSurfaceTotals, SubjectError | DbError> {
+    const dumps = guestRamPaths();
     const db: IDb = this.dependencies.Db;
+    const { subject } = yield* this.loadSubject();
+
+    // Retracted ONCE, before any dump is read, because one pass re-derives
+    // every dump's contribution together. The library-derived bindings come
+    // out of the LIBRARIES' relocation tables and the image's own bytes,
+    // which no dump read touches, so deleting those here would retract
+    // evidence this pass says nothing about. A refresh is not a retraction.
     yield* db.tx(function* () {
-      // Scoped to the rows this derivation produces. The library-derived
-      // bindings come out of the LIBRARIES' relocation tables and the image's
-      // own bytes, neither of which this read touches, so deleting them here
-      // would retract evidence a refresh says nothing about. A refresh is not
-      // a retraction.
       yield* db.run('DELETE FROM import_bindings WHERE subject_sha = ? AND evidence <> ?', [
         subject.sha256,
         'library-relocation',
       ]);
       yield* db.run('DELETE FROM safedisc_records WHERE subject_sha = ?', [subject.sha256]);
-      // Upserted rather than deleted and reinserted, for the same reason: a
-      // name this read cannot produce must survive it. The declared slot set
-      // is a function of the subject's own bytes, which `subject_sha` pins, so
-      // there is no row here that this read could have made obsolete.
-      for (const slot of imports.slots) {
-        yield* db.run(
-          `INSERT INTO import_slots(subject_sha, slot, dll, target, resolution, name,
-                                    descriptor_name, descriptor_ordinal, blocked_by)
-           VALUES (?,?,?,?,?,?,?,?,?)
-           ON CONFLICT(subject_sha, slot) DO UPDATE SET
-             dll = excluded.dll, target = excluded.target, resolution = excluded.resolution,
-             name = COALESCE(excluded.name, import_slots.name),
-             descriptor_name = excluded.descriptor_name,
-             descriptor_ordinal = excluded.descriptor_ordinal,
-             blocked_by = excluded.blocked_by`,
-          [
-            subject.sha256,
-            slot.va,
-            slot.dll,
-            nullable(slot.target),
-            slot.resolution,
-            nullable(slot.name),
-            nullable(slot.descriptorName),
-            nullable(slot.descriptorOrdinal),
-            nullable(slot.blockedBy),
-          ],
+    });
+
+    // The most informative classification any dump gave each slot.
+    //
+    // `buildImportMap` classifies from the cache state of the capture it is
+    // reading, and that is the right question -- 'no-cached-call-site' means
+    // the protection never recorded this slot, which is a fact about the
+    // session, not about whether a call site was identified. Reporting the
+    // LAST dump's answer beside the UNION of the bindings was the bug; so was
+    // my first fix, which recomputed the category from the bindings table and
+    // called 117 slots uncached when 48 were, because a slot can have a cache
+    // entry and no identified call site.
+    //
+    // So the per-dump answers are UNIONED, by how much each one says:
+    // multiple-apis beats not-an-export beats export-exact beats
+    // no-cached-call-site. A slot is only uncached if every capture found it
+    // uncached.
+    const rank: Readonly<Record<SlotResolutionKey, number>> = {
+      'multiple-apis': 3,
+      'not-an-export': 2,
+      'export-exact': 1,
+      'no-cached-call-site': 0,
+    };
+    const bestResolution = new Map<number, SlotResolutionKey>();
+
+    const byDump: Array<{
+      dump: string;
+      cr3: number;
+      loaderBase: number;
+      bindingsOffered: number;
+      bindingsAdded: number;
+      contradictions: Array<{ slot: number; callSite: number; existing: string; offered: string }>;
+    }> = [];
+    let last: ImportMapTotals | undefined;
+
+    for (const dumpPath of dumps) {
+      const { memory, cr3, image } = yield* this.openGuest(dumpPath);
+      const map = yield* required(ModuleMap.load(memory, subject.imageBase));
+      const declared = yield* required(parseImportSlots(image));
+      // SafeDisc's dispatcher and tables are addressed from the base its
+      // loader DLL is actually mapped at in THIS dump, because that base
+      // moves between boots -- 0x00CC0000 in the first dump and a different
+      // value in the next, which is why it is read per dump rather than
+      // recorded.
+      const loader = map.moduleNamed(SAFEDISC_LOADER_DLL);
+      if (Option.isNone(loader)) {
+        return yield* Effect.fail(
+          new GuestMapError({
+            reason:
+              `${SAFEDISC_LOADER_DLL} is not in the loader list of ${dumpPath}, so ` +
+              "SafeDisc's redirection tables have no base to be read from",
+          }),
         );
-        if (Option.isSome(slot.record)) {
-          const record = slot.record.value;
-          yield* db.run(
-            `INSERT INTO safedisc_records(subject_sha, slot, module_index, import_index,
-                                          record_va, stub_va, placeholder, remapped_index,
-                                          resolved_address)
-             VALUES (?,?,?,?,?,?,?,?,?)`,
-            [
-              subject.sha256,
-              slot.va,
-              record.moduleIndex,
-              record.importIndex,
-              record.address,
-              record.stub,
-              record.placeholder,
-              record.remappedIndex,
-              nullable(record.resolvedAddress),
-            ],
-          );
+      }
+      const table = yield* required(
+        RedirectTable.read(
+          memory,
+          loader.value.base,
+          moduleRecordCounts(memory, loader.value.base),
+        ),
+      );
+      const imports = yield* required(
+        buildImportMap({ image, memory, moduleMap: map, table, declared }),
+      );
+      last = imports.totals;
+
+      const account = {
+        dump: dumpPath.split('/').pop() ?? dumpPath,
+        cr3,
+        loaderBase: loader.value.base,
+        bindingsOffered: 0,
+        bindingsAdded: 0,
+        contradictions: [] as Array<{
+          slot: number; callSite: number; existing: string; offered: string;
+        }>,
+      };
+
+      for (const slot of imports.slots) {
+        const prior = bestResolution.get(slot.va);
+        if (prior === undefined || rank[slot.resolution] > rank[prior]) {
+          bestResolution.set(slot.va, slot.resolution);
         }
-        for (const binding of slot.bindings) {
+      }
+
+      yield* db.tx(function* () {
+        for (const slot of imports.slots) {
+          // The declared slot set is a function of the subject's own bytes,
+          // so these rows are the same for every dump; `name` is COALESCEd so
+          // a name one dump cannot produce survives a pass that re-reads it.
           yield* db.run(
-            // The dump's cache is direct evidence of what a call site actually
-            // resolved to, so where it covers a site a library relocation also
-            // names, it replaces that row rather than colliding with it. The
-            // library derivation then re-reads this and reports the pair as
-            // agreeing or contradicting, which is where that comparison
-            // belongs.
-            `INSERT INTO import_bindings(subject_sha, slot, call_site, api, evidence,
-                                         target, bucket, call_operand, blocked_by)
+            `INSERT INTO import_slots(subject_sha, slot, dll, target, resolution, name,
+                                      descriptor_name, descriptor_ordinal, blocked_by)
              VALUES (?,?,?,?,?,?,?,?,?)
-             ON CONFLICT(subject_sha, slot, call_site) DO UPDATE SET
-               api = excluded.api, evidence = excluded.evidence, target = excluded.target,
-               bucket = excluded.bucket, call_operand = excluded.call_operand,
+             ON CONFLICT(subject_sha, slot) DO UPDATE SET
+               dll = excluded.dll,
+               target = COALESCE(excluded.target, import_slots.target),
+               resolution = excluded.resolution,
+               name = COALESCE(excluded.name, import_slots.name),
+               descriptor_name = excluded.descriptor_name,
+               descriptor_ordinal = excluded.descriptor_ordinal,
                blocked_by = excluded.blocked_by`,
             [
               subject.sha256,
               slot.va,
-              binding.callSite,
-              nullable(binding.api),
-              binding.evidence,
-              binding.target,
-              binding.bucket,
-              nullable(binding.callOperand),
-              nullable(binding.blockedBy),
+              slot.dll,
+              nullable(slot.target),
+              slot.resolution,
+              nullable(slot.name),
+              nullable(slot.descriptorName),
+              nullable(slot.descriptorOrdinal),
+              nullable(slot.blockedBy),
             ],
           );
+          if (Option.isSome(slot.record)) {
+            const record = slot.record.value;
+            // DO NOTHING: a record is per-dump runtime state and the table is
+            // keyed by slot, so a second dump's record for a slot the first
+            // already answered would collide. The first answer stands.
+            yield* db.run(
+              `INSERT INTO safedisc_records(subject_sha, slot, module_index, import_index,
+                                            record_va, stub_va, placeholder, remapped_index,
+                                            resolved_address)
+               VALUES (?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(subject_sha, slot) DO NOTHING`,
+              [
+                subject.sha256,
+                slot.va,
+                record.moduleIndex,
+                record.importIndex,
+                record.address,
+                record.stub,
+                record.placeholder,
+                record.remappedIndex,
+                nullable(record.resolvedAddress),
+              ],
+            );
+          }
+          for (const binding of slot.bindings) {
+            account.bindingsOffered += 1;
+            // ACCUMULATE across dumps. A capture answers only for the slots
+            // its session exercised, so a later dump's value is the point --
+            // but where an earlier dump already answered the same (slot, call
+            // site) pair, the earlier answer stands and a disagreement is
+            // RECORDED rather than overwritten: one of the two reads is wrong
+            // about that call site, and silently preferring either would hide
+            // it.
+            const existing = (yield* db.one(
+              `SELECT api, evidence FROM import_bindings
+                WHERE subject_sha = ? AND slot = ? AND call_site = ?`,
+              [subject.sha256, slot.va, binding.callSite],
+            )) as { api: string | null; evidence: string } | null;
+
+            const offered = nullable(binding.api);
+            if (existing !== null && existing.evidence !== 'library-relocation') {
+              if (
+                offered !== null &&
+                existing.api !== null &&
+                existing.api.toLowerCase() !== offered.toLowerCase()
+              ) {
+                account.contradictions.push({
+                  slot: slot.va,
+                  callSite: binding.callSite,
+                  existing: existing.api,
+                  offered,
+                });
+              }
+              continue;
+            }
+
+            // A library relocation names a call site from the image's own
+            // bytes; the dump's cache is direct evidence of what that site
+            // actually resolved to, so it replaces that row. The library
+            // derivation re-reads this and reports the pair as agreeing or
+            // contradicting, which is where that comparison belongs.
+            const added = yield* db.run(
+              `INSERT INTO import_bindings(subject_sha, slot, call_site, api, evidence,
+                                           target, bucket, call_operand, blocked_by)
+               VALUES (?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(subject_sha, slot, call_site) DO UPDATE SET
+                 api = excluded.api, evidence = excluded.evidence, target = excluded.target,
+                 bucket = excluded.bucket, call_operand = excluded.call_operand,
+                 blocked_by = excluded.blocked_by`,
+              [
+                subject.sha256,
+                slot.va,
+                binding.callSite,
+                offered,
+                binding.evidence,
+                binding.target,
+                binding.bucket,
+                nullable(binding.callOperand),
+                nullable(binding.blockedBy),
+              ],
+            );
+            if (added > 0) account.bindingsAdded += 1;
+          }
         }
+      });
+      // Recorded as the pass runs: these rows are both the report and the
+      // trigger. A dump on disk that is not listed here means the surface
+      // has never been read from it.
+      yield* db.run(
+        `INSERT INTO import_dumps(subject_sha, dump, bytes, cr3, loader_base,
+                                  bindings_offered, bindings_added, contradictions, read_at)
+         VALUES (?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(subject_sha, dump) DO UPDATE SET
+           bytes = excluded.bytes, cr3 = excluded.cr3,
+           loader_base = excluded.loader_base,
+           bindings_offered = excluded.bindings_offered,
+           bindings_added = excluded.bindings_added,
+           contradictions = excluded.contradictions,
+           read_at = excluded.read_at`,
+        [
+          subject.sha256,
+          account.dump,
+          (yield* fileSize(dumpPath)),
+          account.cr3,
+          account.loaderBase,
+          account.bindingsOffered,
+          account.bindingsAdded,
+          account.contradictions.length,
+          Date.now() / 1000,
+        ],
+      );
+      byDump.push(account);
+    }
+
+    if (last === undefined) {
+      return yield* Effect.fail(
+        new GuestMapError({
+          reason: 'no memory dump is on disk, so the import surface cannot be read at all',
+        }),
+      );
+    }
+    // EVERYTHING union-scoped is re-read from the table. Taking the binding
+    // counts from the union while taking `resolutions` from the last dump's
+    // in-memory view put two scopes in one report, and produced a slot
+    // classified 'multiple-apis' whose recorded bindings named one API.
+    const union = (yield* db.one(
+      `SELECT COUNT(*) AS bindings,
+              COUNT(api) AS named,
+              COUNT(DISTINCT LOWER(api)) AS apis
+         FROM import_bindings WHERE subject_sha = ?`,
+      [subject.sha256],
+    )) as { bindings: number; named: number; apis: number } | null;
+
+    // One further promotion, from what was actually recorded: if the union of
+    // bindings names more than one API for a slot, that slot serves several
+    // however any single capture classified it. This is the case an
+    // API-per-slot model gets wrong, so it must not be lost to a dump that
+    // happened to see only one of them.
+    const multi = (yield* db.all(
+      `SELECT slot FROM import_bindings
+        WHERE subject_sha = ?
+        GROUP BY slot HAVING COUNT(DISTINCT LOWER(api)) > 1`,
+      [subject.sha256],
+    )) as ReadonlyArray<{ slot: number }>;
+    for (const row of multi) bestResolution.set(row.slot, 'multiple-apis');
+
+    yield* db.tx(function* () {
+      for (const [slot, resolution] of bestResolution) {
+        yield* db.run(
+          'UPDATE import_slots SET resolution = ? WHERE subject_sha = ? AND slot = ?',
+          [resolution, subject.sha256, slot],
+        );
       }
     });
-    return imports.totals;
+
+    const resolutions: Record<SlotResolutionKey, number> = {
+      'export-exact': 0,
+      'multiple-apis': 0,
+      'no-cached-call-site': 0,
+      'not-an-export': 0,
+    };
+    for (const resolution of bestResolution.values()) resolutions[resolution] += 1;
+
+    return {
+      ...last,
+      resolutions,
+      bindings: union?.bindings ?? last.bindings,
+      namedBindings: union?.named ?? last.namedBindings,
+      distinctApis: union?.apis ?? last.distinctApis,
+      byDump,
+    };
   }
 
   // ------------------------------------------------------------ CRT identity
