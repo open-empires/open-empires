@@ -249,7 +249,11 @@ export class DiscoveryImpl
 
       // Store the decode, so the rejection can be checked later against the
       // same bytes rather than taken on trust.
-      const listing = yield* disasm.listing(img, { va, size: row.size }, Option.none());
+      // false: the whole point of a rejection is that this extent is not
+      // trusted, so an undecodable tail must not be dressed up as data.
+      const listing = yield* disasm.listing(
+        img, { va, size: row.size }, Option.none(), false,
+      );
       const evidence = Option.getOrElse(
         listing,
         () => `${row.size} bytes at 0x${va.toString(16)} do not decode to exactly that span`,

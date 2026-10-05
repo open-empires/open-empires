@@ -158,8 +158,15 @@ export class WorkImpl
   private *describe(va: number, size: number): EffectGen<WorkItem, WorkFailure> {
     const db = this.dependencies.Db;
     const img = yield* this.image();
+    // A proof is the only thing that establishes the recorded extent is the
+    // function's true extent, and it decides whether an undecodable tail is
+    // a switch table in the body or half an instruction past a wrong size.
+    const provenHere = (yield* db.one(
+      'SELECT COUNT(*) AS n FROM proven WHERE va = ?',
+      [va],
+    )) as { n: number } | null;
     const listing = yield* this.dependencies.Disasm.listing(
-      img, { va, size }, Option.none(),
+      img, { va, size }, Option.none(), (provenHere?.n ?? 0) > 0,
     );
 
     const prior = yield* db.all(
@@ -206,7 +213,21 @@ export class WorkImpl
     return {
       va,
       size,
-      disassembly: Option.getOrElse(listing, () => ''),
+      // NEVER a silent empty string. An entry whose extent does not decode
+      // used to arrive as `''`, so an agent saw a function with no body and
+      // no reason given, and the address stayed in the queue forever. Two
+      // such entries were found by hand at 0x5a4afa and 0x5a4e99.
+      disassembly: Option.getOrElse(
+        listing,
+        () =>
+          `;; NO LISTING. The ${size} bytes recorded at ` +
+          `0x${va.toString(16)} do not decode as instructions. Either the ` +
+          `recorded size cuts an instruction in half, or the body ends in a ` +
+          `switch table; nothing here can tell which, and no proof exists ` +
+          `against this span to settle it. Do NOT reconstruct from a guess ` +
+          `-- the extent has to be established first ` +
+          `(POST /api/discovery/workability).`,
+      ),
       siblings: top.map((s) => ({
         va: s.va,
         similarity: s.exactShape ? 1 : s.mnemonicSimilarity,

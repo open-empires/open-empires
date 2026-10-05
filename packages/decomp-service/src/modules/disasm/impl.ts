@@ -108,9 +108,48 @@ export class DisasmImpl extends implementing(modules.Disasm) implements IDisasm 
     subject: SubjectImage,
     fn: FunctionExtent,
     relocationMask: Option.Option<Uint8Array>,
+    trustedExtent: boolean,
   ): EffectGen<Option.Option<string>, DisasmError> {
-    const insns = yield* this.decodeFunction(subject, fn);
-    return Option.map(insns, (l) => renderListing(fn, l, relocationMask));
+    const exact = yield* this.decodeFunction(subject, fn);
+    if (Option.isSome(exact)) {
+      return Option.some(renderListing(fn, exact.value, relocationMask));
+    }
+
+    // The decode did not cover the span exactly. That has two causes and only
+    // one of them is a defect:
+    //
+    //   DATA IN THE BODY -- a switch jump table or index table, which MSVC
+    //   places inside the function. The size is right, the gate proves those
+    //   bytes, and 0x563770 is proven at 2009 bytes with one in it. The
+    //   instructions before it are a real listing and the rest is data.
+    //
+    //   A WRONG SIZE -- the span cuts an instruction in half, so the decode
+    //   OVERSHOOTS the span. Nothing here can render that honestly: every
+    //   instruction boundary after the cut is a guess. 0x568300 (recorded
+    //   1638, cutting `push 0x675714` after 2 bytes) is this case.
+    //
+    // Only the caller can tell these apart, so only the caller decides.
+    // `covered < fn.size` does NOT discriminate: decodeSpan clamps to the
+    // span, so an instruction straddling the recorded end fails to decode
+    // and the coverage falls short either way. Rendering on that test alone
+    // printed 0x568300's half of a `push 0x675714` as though it were a
+    // switch table.
+    if (!trustedExtent) return Option.none<string>();
+    return yield* this.decoding((d) => {
+      const insns = decodeSpan(d, subject, fn.va, fn.size);
+      if (insns.length === 0) return Option.none<string>();
+      const covered = insns.reduce((n, i) => n + i.size, 0);
+      if (covered >= fn.size) return Option.none<string>();
+      const off = fn.va - subject.imageBase;
+      return Option.some(
+        renderListing(
+          fn,
+          insns,
+          relocationMask,
+          subject.bytes.subarray(off + covered, off + fn.size),
+        ),
+      );
+    });
   }
 
   *fingerprint(

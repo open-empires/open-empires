@@ -276,6 +276,27 @@ export interface IDisasm {
     subject: SubjectImage,
     fn: FunctionExtent,
     relocationMask: Option.Option<Uint8Array>,
+    /**
+     * Whether `fn.size` is known to be the function's true extent -- in
+     * practice, whether a proof was taken against it.
+     *
+     * It decides what an undecodable tail MEANS, and nothing inside the
+     * decoder can tell the two cases apart. `decodeSpan` clamps to the span,
+     * so an instruction straddling the recorded end does not decode at all;
+     * the coverage therefore falls short in BOTH cases:
+     *
+     *   trusted   -- the tail is data the compiler put in the body (a switch
+     *                jump table or index table). Render it as data.
+     *   untrusted -- the tail may be half an instruction, in which case the
+     *                size is wrong. Refuse: every boundary after the cut
+     *                would be a guess, and presenting it as a table invites
+     *                an agent to reconstruct a function that stops early.
+     *
+     * Measured on this subject: 0x563770 is proven at 2009 bytes and ends in
+     * a byte-per-case index table, while 0x568300's recorded 1638 cuts
+     * `push 0x675714` after two bytes. Both look identical from here.
+     */
+    trustedExtent: boolean,
   ): EffectGen<Option.Option<string>, DisasmError>;
 
   fingerprint(
