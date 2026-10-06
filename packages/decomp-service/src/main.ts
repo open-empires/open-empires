@@ -223,16 +223,26 @@ const routes = async (req: Request): Promise<Response> => {
                   Option.getOrUndefined(str(body.toolchain)),
                 ),
               );
-            case 'park':
+            case 'park': {
               // Both fields are required. A park is how a function leaves the
               // queue, and the class is the only part that aggregates into
               // "what is stopping us" -- the figure that decides what gets
               // built next.
-              yield* work.park(
+              //
+              // `source` is optional and should be sent: the candidate the
+              // class was measured against is what a second pass reads, and
+              // every large function proved on this project closed on a
+              // second pass over an earlier worker's candidate.
+              const parked = yield* work.park(
                 agentId, num(body.va), String(body.blockedClass ?? ''),
                 String(body.eliminated ?? ''),
+                Option.getOrUndefined(str(body.source)),
               );
-              return { ok: true };
+              // Says that the claim is gone. It always was; nothing reported
+              // it, so an agent following "your last action is a gate run on
+              // everything `claims` reports" found it reported nothing.
+              return { ok: true, claimReleased: parked.claimReleased };
+            }
             case 'release': {
               const freed = yield* work.release(agentId, num(body.va));
               return freed
@@ -266,6 +276,7 @@ const routes = async (req: Request): Promise<Response> => {
                   size: r.size,
                   blockedClass: Option.getOrNull(r.blockedClass),
                   eliminated: Option.getOrNull(r.eliminated),
+                  source: Option.getOrNull(r.source),
                   note: Option.getOrNull(r.note),
                   claimed: r.claimed,
                 })),

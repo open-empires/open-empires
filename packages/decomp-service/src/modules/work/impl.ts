@@ -634,7 +634,8 @@ export class WorkImpl
     const like = Option.getOrElse(klass, () => '');
     const rows = (yield* db.all(
       `SELECT n.va AS va, f.size AS size, n.blocked_class AS blocked_class,
-              n.eliminated AS eliminated, n.note AS note, n.updated_at AS updated_at,
+              n.eliminated AS eliminated, n.source AS source,
+              n.note AS note, n.updated_at AS updated_at,
               EXISTS(SELECT 1 FROM claims c
                       WHERE c.subject_sha = n.subject_sha AND c.va = n.va
                         AND c.released_at IS NULL AND c.expires_at > ?) AS claimed
@@ -647,13 +648,15 @@ export class WorkImpl
       [at, like, like, Math.min(200, Math.max(1, limit))],
     )) as ReadonlyArray<{
       va: number; size: number; blocked_class: string | null;
-      eliminated: string | null; note: string | null; updated_at: number; claimed: number;
+      eliminated: string | null; source: string | null;
+      note: string | null; updated_at: number; claimed: number;
     }>;
     return rows.map((r) => ({
       va: r.va,
       size: r.size,
       blockedClass: Option.fromNullishOr(r.blocked_class),
       eliminated: Option.fromNullishOr(r.eliminated),
+      source: Option.fromNullishOr(r.source),
       note: Option.fromNullishOr(r.note),
       updatedAt: r.updated_at,
       claimed: r.claimed === 1,
@@ -1181,7 +1184,8 @@ export class WorkImpl
     va: number,
     blockedClass: string,
     eliminated: string,
-  ): EffectGen<void, DbError | NotClaimed | ParkWithoutReason> {
+    source?: string,
+  ): EffectGen<{ readonly claimReleased: boolean }, DbError | NotClaimed | ParkWithoutReason> {
     const db = this.dependencies.Db;
     const t = now();
     yield* this.touch(agentId);
@@ -1204,15 +1208,29 @@ export class WorkImpl
       [va, agentId],
     );
     if (held === null) return yield* Effect.fail(yield* this.whyNotClaimed(va, agentId));
-    yield* db.run(
-      `INSERT INTO near_misses(subject_sha, va, blocked_class, eliminated, updated_at)
-       SELECT c.subject_sha, ?, ?, ?, ? FROM current_config c WHERE c.only_row = 1
-       ON CONFLICT(subject_sha, va) DO UPDATE SET
-         blocked_class = excluded.blocked_class,
-         eliminated = excluded.eliminated, updated_at = excluded.updated_at`,
-      [va, blockedClass, eliminated, t],
-    );
-    yield* db.run(`UPDATE claims SET released_at = ? WHERE va = ? AND agent_id = ?`, [t, va, agentId]);
+    const candidate = source !== undefined && source.trim() !== '' ? source : null;
+    let released = 0;
+    yield* db.tx(function* () {
+      yield* db.run(
+        `INSERT INTO near_misses(subject_sha, va, blocked_class, eliminated, source, updated_at)
+         SELECT c.subject_sha, ?, ?, ?, ?, ? FROM current_config c WHERE c.only_row = 1
+         ON CONFLICT(subject_sha, va) DO UPDATE SET
+           blocked_class = excluded.blocked_class,
+           eliminated = excluded.eliminated,
+           -- A re-park that carries no source must not ERASE the one already
+           -- there. A worker corrects an eliminated field far more often
+           -- than it has a better candidate, and losing the candidate to a
+           -- text edit is the failure this column was added to prevent.
+           source = COALESCE(excluded.source, near_misses.source),
+           updated_at = excluded.updated_at`,
+        [va, blockedClass, eliminated, candidate, t],
+      );
+      released = yield* db.run(
+        `UPDATE claims SET released_at = ? WHERE va = ? AND agent_id = ? AND released_at IS NULL`,
+        [t, va, agentId],
+      );
+    });
+    return { claimReleased: released > 0 };
   }
 
   /**

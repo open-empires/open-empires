@@ -296,6 +296,9 @@ export interface ParkedRecord {
   /** What the author ruled out, verbatim. The reason a second pass is cheaper
    *  than a first. */
   readonly eliminated: Option.Option<string>;
+  /** The candidate those eliminations were measured against, when the park
+   *  carried one. `None` for records written before parks stored it. */
+  readonly source: Option.Option<string>;
   readonly note: Option.Option<string>;
   readonly updatedAt: number;
   /** True while someone holds it, so a reader does not start on work in
@@ -550,8 +553,32 @@ export interface IWork {
     EffectGen<Verdict, SubmitFailure>;
 
   /** Record a diagnosed near-miss and give the lease back. */
-  park(agentId: string, va: number, blockedClass: string, eliminated: string):
-    EffectGen<void, DbError | NotClaimed | ParkWithoutReason>;
+  /**
+   * Set a function aside with the class that stopped it, what was ruled out,
+   * and the candidate those were measured against.
+   *
+   * `source` is optional only because every record written before it had
+   * none. Pass it. A park without it leaves the next pass reading prose, and
+   * two workers in one day found the wip file their predecessor's record
+   * pointed at simply absent -- one retyped a candidate out of fragments the
+   * record happened to quote. That matters here more than almost anywhere,
+   * because every function above 1,024 bytes that has been proved closed on a
+   * SECOND PASS over an earlier worker's written reading: the candidate is
+   * the deliverable of a first pass, and the service was not keeping it.
+   *
+   * Returns whether the claim was released, because it IS released and
+   * nothing said so. The protocol tells an agent its last action is a gate
+   * run on everything `claims` reports; after five parks `claims` reported
+   * nothing, so the required step became a silent no-op and a worker
+   * re-claimed to carry it out.
+   */
+  park(
+    agentId: string,
+    va: number,
+    blockedClass: string,
+    eliminated: string,
+    source?: string,
+  ): EffectGen<{ readonly claimReleased: boolean }, DbError | NotClaimed | ParkWithoutReason>;
 
   /** True when a live claim was actually given back. False means the caller
    *  did not hold that address, which must not read as success. */

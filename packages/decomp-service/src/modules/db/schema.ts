@@ -1819,4 +1819,30 @@ CREATE INDEX IF NOT EXISTS function_closability_rank
               WHERE name IN ('branches','x87','jump_table','size')`,
     verifyExpects: 'nonzero',
   },
+  {
+    id: '025-near-miss-carries-its-source',
+    sql: `
+-- A NEAR-MISS RECORD WITH NO SOURCE.
+--
+-- The service owns the proof record -- an exact source lives in attempts
+-- and nothing can lose it. It did not own the near-miss record: a park stored
+-- the blocked class and the eliminations and NOT the candidate those were
+-- measured against, so the candidate lived in a file under decomp/src/wip/.
+--
+-- Two workers reported the same consequence in one day. Records of 2,000
+-- characters quoted their best source inline in prose while the wip file did
+-- not exist, and one of them retyped a candidate out of the prose to continue.
+-- That matters more here than almost anywhere else, because every function
+-- above 1,024 bytes that has been proved closed on a SECOND PASS over an
+-- earlier worker's written reading -- the candidate IS the deliverable of a
+-- first pass.
+--
+-- Nullable: every existing row predates this and has no source to put in it,
+-- and a column that forced one would have to invent it.
+ALTER TABLE near_misses ADD COLUMN source TEXT;
+`,
+    verify: `SELECT COUNT(*) AS present FROM pragma_table_info('near_misses')
+              WHERE name = 'source'`,
+    verifyExpects: 'nonzero',
+  },
 ];
