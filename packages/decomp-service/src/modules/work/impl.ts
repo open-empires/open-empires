@@ -1,5 +1,5 @@
-import { Effect, Option } from 'effect';
-import { implementing, type EffectGen } from 'effective-modules';
+import { Effect, Option, Result } from 'effect';
+import { effunct, implementing, type EffectGen } from 'effective-modules';
 import { modules } from '../index';
 import type { DbError } from '../db/interface';
 import { SUBJECT_FLAGS, SUBJECT_FLAGS_O1, type EmittedCode } from '../gate/interface';
@@ -637,7 +637,48 @@ export class WorkImpl
       // discards the emitted bytes and nothing else -- so asking for them
       // here costs nothing, and keeping them is what removes the second
       // compile that used to follow this loop.
-      const c = yield* gate.contribute({ va, original, source, flags, toolchain: install });
+      //
+      // ONE FLAG SET MAY NOT SINK THE SWEEP. The gate builds an identity probe
+      // per flag set, and a flag this compiler does not accept failed the
+      // whole request: a twelve-set sweep returned
+      // `GateUnavailable ... status=2 size=0`, threw away the eleven results
+      // that had compiled, and did not say which set was at fault. The flag
+      // was `/GZ`, which is VC6 SP5 and not SP3. A caller then has to bisect
+      // by hand, at one full compile cycle per attempt, to recover work the
+      // service already did.
+      //
+      // So the failure is recorded AS AN OUTCOME for that flag set, carrying
+      // the gate's own reason, and the rest of the sweep proceeds. A flag set
+      // that cannot be built is a fact about the flag set, not about the
+      // reconstruction.
+      const attempted = yield* Effect.result(
+        effunct(function* () {
+          return yield* gate.contribute({ va, original, source, flags, toolchain: install });
+        })(),
+      );
+      if (!Result.isSuccess(attempted)) {
+        const why: unknown = attempted.failure;
+        outcomes.push({
+          flags,
+          compiled: false,
+          exact: false,
+          matchedAtEntry: false,
+          emittedSize: Option.none(),
+          masked: Option.none(),
+          firstDiff: Option.none(),
+          detail: Option.some(
+            `this flag set could not be built: ${
+              typeof why === 'object' && why !== null && 'reason' in why
+                ? String((why as { reason: unknown }).reason)
+                : String(why)
+            }`,
+          ),
+          emittedSha: Option.none(),
+          offConfiguration: flags !== SUBJECT_FLAGS && flags !== SUBJECT_FLAGS_O1,
+        });
+        continue;
+      }
+      const c = attempted.success;
       const v = c.verdict;
       entries.set(flags, c.entry);
       outcomes.push({
