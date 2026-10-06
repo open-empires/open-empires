@@ -194,7 +194,37 @@ const routes = async (req: Request): Promise<Response> => {
   // An agent holds no files, runs no compiler and takes no lock.
   if (seg[0] === 'api' && seg[1] === 'work') {
     const agentId = String(body.agent ?? '');
-    const num = (v: unknown) => (typeof v === 'number' ? v : Number(v));
+    /**
+     * An address, or a refusal. NEVER NaN.
+     *
+     * This was `Number(v)`, which turns a bare `0x4e2a20` written unquoted in
+     * a JSON body into NaN -- and NaN then flowed into a query, matched
+     * nothing, and came back as "you hold no live claim on 0xNaN". A worker
+     * read that as a statement about its claim rather than about its request.
+     * An input that cannot fail produces a plausible answer to a question
+     * nobody asked, which is the failure mode this project has paid for most.
+     */
+    const num = (v: unknown): number => {
+      const n = typeof v === 'number' ? v : Number(v);
+      return Number.isFinite(n) ? n : Number.NaN;
+    };
+    const badVa = (v: unknown): boolean => !Number.isFinite(num(v));
+    // One guard for every action that names an address, rather than each one
+    // discovering NaN for itself. A malformed address used to reach the
+    // query and come back as a statement about the CLAIM ("you hold no live
+    // claim on 0xNaN") instead of about the request.
+    const vaActions = new Set(['submit', 'amend', 'sweep', 'probe', 'park', 'release']);
+    if (seg[2] !== undefined && vaActions.has(seg[2]) && badVa(body.va)) {
+      return json(
+        {
+          ok: false,
+          error:
+            `va must be a number; received ${JSON.stringify(body.va)}. In JSON a hex ` +
+            `address needs quoting ("0x4e2a20") or writing in decimal (5123104).`,
+        },
+        400,
+      );
+    }
     return handle(
       provided(
         Effect.gen(function* () {
@@ -535,6 +565,65 @@ const routes = async (req: Request): Promise<Response> => {
             }),
             onSome: (w) => ({ note: w.note, updatedAt: w.updatedAt }),
           });
+        }),
+      ) as Effect.Effect<unknown, { readonly _tag: string }, never>,
+    );
+  }
+
+  // /api/source/0x549fd0   the proved source for one address
+  //
+  // Three workers asked for this independently. Without it the only ways to
+  // read a proven function's source were to claim something near it and hope
+  // it landed in the five ranked siblings, to read `decomp/src/fn/` off disk,
+  // or to query `attempts` directly -- and the file route works only because
+  // files happen to be kept, while the database route is the one thing agents
+  // are told never to do. The service owns the proof; it should serve it.
+  //
+  // Sibling reuse is also the biggest measured win here, and two workers
+  // found the source they needed was NOT among the offered siblings
+  // (similarity 2-3%): one recovered a struct verbatim from a function's
+  // opposite number, Load from Save, found by address rather than by shape.
+  if (seg[0] === 'api' && seg[1] === 'source' && seg.length === 3) {
+    const at = Number(seg[2]);
+    if (!Number.isFinite(at)) {
+      return json({ ok: false, error: `${seg[2]} is not an address` }, 400);
+    }
+    return handle(
+      provided(
+        Effect.gen(function* () {
+          const db = yield* modules.Db;
+          const row = (yield* db.one(
+            `SELECT a.source AS source, a.flags AS flags, a.author AS author,
+                    p.size AS size, p.masked AS masked, p.compared AS compared,
+                    p.decided_at AS decided_at
+               FROM proven p
+               JOIN attempts a ON a.id = p.attempt_id
+               JOIN current_config c ON c.only_row = 1 AND c.subject_sha = p.subject_sha
+              WHERE p.va = ?`,
+            [at],
+          )) as {
+            source: string; flags: string; author: string | null;
+            size: number; masked: number; compared: number; decided_at: number;
+          } | null;
+          if (row === null) {
+            // Says which of the two it is. "No source" and "not proven" are
+            // different facts and a caller acts differently on each.
+            return {
+              ok: false,
+              va: `0x${at.toString(16)}`,
+              error: 'no proof is in force for this address under the current configuration',
+            };
+          }
+          return {
+            va: `0x${at.toString(16)}`,
+            size: row.size,
+            flags: row.flags,
+            author: row.author,
+            masked: row.masked,
+            compared: row.compared,
+            provedAt: row.decided_at,
+            source: row.source,
+          };
         }),
       ) as Effect.Effect<unknown, { readonly _tag: string }, never>,
     );
