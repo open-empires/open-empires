@@ -103,8 +103,24 @@ export interface WorkItem {
 }
 
 export interface Verdict {
+  /**
+   * Byte-exact AND at the emitted function's entry. The two are conjoined
+   * here on purpose: this is the field a caller acts on, and the weaker "the
+   * bytes occur somewhere inside a larger emission" must never be readable as
+   * a proof.
+   */
   readonly exact: boolean;
   readonly compiled: boolean;
+  /**
+   * Where the bytes matched, when they matched anywhere: `0` at the entry, a
+   * positive offset for a fragment match, `None` for no match at all.
+   *
+   * Reported alongside `exact` because a fragment match used to arrive as a
+   * bare `exact: false`, indistinguishable from matching nothing -- and
+   * "your bytes are in there, just not at the entry" is one of the more
+   * useful things the gate can say.
+   */
+  readonly matchedAt: Option.Option<number>;
   readonly emittedSize: Option.Option<number>;
   readonly masked: Option.Option<number>;
   readonly compared: Option.Option<number>;
@@ -124,6 +140,17 @@ export interface Verdict {
  * easiest way to starve everyone else.
  */
 export const MAX_SWEEP_FLAG_SETS = 24;
+
+/**
+ * How many source spellings one probe may compile.
+ *
+ * The compiler is one serialised container shared by every agent and by the
+ * composition proof, so a probe is capped the way a sweep is. Sixteen is
+ * enough for the cross products workers actually submit -- the largest so far
+ * was nineteen, run as nineteen separate calls -- and small enough that one
+ * probe cannot hold the container for minutes.
+ */
+export const MAX_PROBE_SOURCES = 16;
 
 /** What one flag set did to one source. */
 export interface SweepOutcome {
@@ -219,6 +246,51 @@ export interface HeldClaim {
   readonly proven: boolean;
 }
 
+/**
+ * One source spelling's outcome under one flag set.
+ *
+ * Deliberately the same fields a sweep outcome carries, minus the flag set:
+ * a probe varies the SOURCE where a sweep varies the flags, and a reader
+ * should not have to learn two shapes to compare them.
+ */
+export interface ProbeOutcome {
+  /** Index into the `sources` array as it was submitted, so an outcome can be
+   *  matched back to the spelling that produced it. */
+  readonly index: number;
+  readonly compiled: boolean;
+  readonly exact: boolean;
+  readonly matchedAtEntry: boolean;
+  readonly emittedSize: Option.Option<number>;
+  readonly masked: Option.Option<number>;
+  readonly firstDiff: Option.Option<number>;
+  readonly emittedSha: Option.Option<string>;
+  readonly detail: Option.Option<string>;
+}
+
+export interface ProbeReport {
+  readonly va: number;
+  readonly size: number;
+  readonly flags: string;
+  readonly outcomes: ReadonlyArray<ProbeOutcome>;
+  /** Indices of sources that matched at the entry. Empty is the usual answer. */
+  readonly matched: ReadonlyArray<number>;
+  /**
+   * Sources grouped by the bytes they emitted, largest group first.
+   *
+   * This is the answer a structural question actually wants. A worker
+   * established that nineteen structurally different spellings of one function
+   * -- three guard forms crossed with four inner-arm forms, a `switch`, a
+   * `do{break;}while(0)`, the body as a `static inline` helper -- all emit
+   * byte-identical output, and it cost nineteen round trips to find out.
+   * Grouping by digest says it in one call, and says which axes are inert
+   * before any of them is reasoned about.
+   */
+  readonly identical: ReadonlyArray<{
+    readonly emittedSha: string;
+    readonly indices: ReadonlyArray<number>;
+  }>;
+}
+
 export interface SweepReport {
   readonly va: number;
   readonly size: number;
@@ -247,6 +319,30 @@ export interface IWork {
     leaseSeconds: number,
     vas?: ReadonlyArray<number>,
   ): EffectGen<ReadonlyArray<WorkItem>, WorkFailure>;
+
+  /**
+   * Compile MANY SOURCES under ONE flag set, and group them by the bytes they
+   * emitted.
+   *
+   * `sweep` varies the flags over one source. Every structural question is the
+   * other way round: which spelling of this function emits the subject's
+   * bytes. Asking it meant one HTTP call and one container round trip per
+   * spelling, and two workers reported that the round trip rather than the
+   * reasoning set their pace -- a fifteen-variant cross product is fifteen
+   * calls at about four seconds each.
+   *
+   * Writes nothing, for the same reason `sweep` writes nothing: a spelling
+   * that happens to match under flags the configuration does not name is a
+   * finding for a person, not a verdict. Needs a live claim, also like
+   * `sweep`, because it costs the one serialised compiler.
+   */
+  probe(
+    agentId: string,
+    va: number,
+    sources: ReadonlyArray<string>,
+    flags: string,
+    install?: string,
+  ): EffectGen<ProbeReport, SubmitFailure>;
 
   /**
    * Why each named address can or cannot be claimed.

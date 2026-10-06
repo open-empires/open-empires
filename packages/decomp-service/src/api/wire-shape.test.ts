@@ -17,7 +17,7 @@
  */
 import { expect, test } from 'bun:test';
 import { Option, Schema } from 'effect';
-import { AgentsWire, SweepReportWire } from './wire';
+import { AgentsWire, ProbeReportWire, SweepReportWire, VerdictWire } from './wire';
 
 const encodeAgents = Schema.encodeUnknownSync(AgentsWire);
 
@@ -131,6 +131,82 @@ test('two outcomes are comparable for identical codegen by digest alone', () => 
 
 test('no sweep outcome field is an Option wrapper', () => {
   for (const [name, value] of Object.entries(sweepOutcome())) {
+    const wrapped =
+      typeof value === 'object' && value !== null && '_tag' in (value as object);
+    expect(wrapped, `${name} arrived as an Option wrapper`).toBe(false);
+  }
+});
+
+/**
+ * A probe groups source spellings by the bytes they emitted, and the group is
+ * the answer. If `identical` or the digests inside it arrived wrapped, a
+ * reader would see every spelling as its own group and conclude that an inert
+ * axis mattered -- the opposite of what the field exists to say.
+ */
+const encodeProbeReport = Schema.encodeUnknownSync(ProbeReportWire);
+
+test('a probe reports its groups and digests as plain values', () => {
+  const r = encodeProbeReport({
+    va: 0x401000,
+    size: 8,
+    flags: '/O2 /GX /GR-',
+    outcomes: [
+      {
+        index: 0, compiled: true, exact: true, matchedAtEntry: true,
+        emittedSize: Option.some(16), masked: Option.some(0),
+        firstDiff: Option.none(), emittedSha: Option.some('a'.repeat(64)),
+        detail: Option.none(),
+      },
+      {
+        index: 1, compiled: false, exact: false, matchedAtEntry: false,
+        emittedSize: Option.none(), masked: Option.none(),
+        firstDiff: Option.none(), emittedSha: Option.none(),
+        detail: Option.some("error C2065: 'q' : undeclared identifier"),
+      },
+    ],
+    matched: [0],
+    identical: [{ emittedSha: 'a'.repeat(64), indices: [0] }],
+  }) as {
+    identical: ReadonlyArray<Record<string, unknown>>;
+    outcomes: ReadonlyArray<Record<string, unknown>>;
+  };
+  expect(r.identical[0]!.emittedSha).toBe('a'.repeat(64));
+  expect(r.identical[0]!.indices).toEqual([0]);
+  // A spelling the compiler rejected is an OUTCOME carrying the diagnostic,
+  // never a failed request: a probe exists to be given sources that may be
+  // wrong, so one bad one must not discard the rest.
+  expect(r.outcomes[1]!.compiled).toBe(false);
+  expect(r.outcomes[1]!.emittedSha).toBeNull();
+  expect(String(r.outcomes[1]!.detail)).toContain('C2065');
+});
+
+/**
+ * `exact` on a verdict is already "byte-exact AND at the entry". `matchedAt`
+ * is beside it so the middle case is visible: bytes that matched at a
+ * non-zero offset are a fragment match, which is a weaker and different
+ * claim, and used to arrive as a bare `exact: false` that looked exactly like
+ * matching nothing.
+ */
+const encodeVerdictWire = Schema.encodeUnknownSync(VerdictWire);
+
+const verdict = (over: Record<string, unknown> = {}) =>
+  encodeVerdictWire({
+    exact: false, compiled: true, matchedAt: Option.some(2),
+    emittedSize: Option.some(16), masked: Option.some(0), compared: Option.some(8),
+    firstDiff: Option.none(), detail: Option.none(), weak: false,
+    ...over,
+  }) as Record<string, unknown>;
+
+test('a fragment match is distinguishable from no match at all', () => {
+  expect(verdict().matchedAt).toBe(2);
+  expect(verdict().exact).toBe(false);
+  expect(verdict({ matchedAt: Option.none() }).matchedAt).toBeNull();
+  // The entry match, which is the only one that may be read as a proof.
+  expect(verdict({ exact: true, matchedAt: Option.some(0) }).matchedAt).toBe(0);
+});
+
+test('no verdict field is an Option wrapper', () => {
+  for (const [name, value] of Object.entries(verdict())) {
     const wrapped =
       typeof value === 'object' && value !== null && '_tag' in (value as object);
     expect(wrapped, `${name} arrived as an Option wrapper`).toBe(false);

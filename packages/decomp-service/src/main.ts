@@ -44,7 +44,7 @@ import { SUBJECT_FLAGS, SWEEP_FLAG_SETS } from './modules/gate/interface';
 import type { PortState } from './modules/portable/interface';
 import {
   encodeAgents, encodeComposition, encodeGlobal, encodeGlobals, encodeNames, encodeSweep,
-  encodeVerdict, encodeWorkItems,
+  encodeProbe, encodeVerdict, encodeWorkItems,
 } from './api/wire';
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -248,6 +248,20 @@ const routes = async (req: Request): Promise<Response> => {
             // the same live lease `submit` does, and it writes nothing: a hit
             // under flags the configuration does not name is a finding for a
             // person, not a verdict.
+            // MANY SOURCES, ONE FLAG SET -- the mirror of `sweep`, and the
+            // call a structural question actually needs. Two workers reported
+            // that one HTTP round trip per source spelling, not the
+            // reasoning, set their pace.
+            case 'probe':
+              return encodeProbe(
+                yield* work.probe(
+                  agentId,
+                  num(body.va),
+                  Array.isArray(body.sources) ? body.sources.map((x) => String(x)) : [],
+                  String(body.flags ?? SUBJECT_FLAGS),
+                  Option.getOrUndefined(str(body.toolchain)),
+                ),
+              );
             case 'sweep':
               return encodeSweep(
                 yield* work.sweep(

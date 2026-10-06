@@ -5,9 +5,9 @@ import type { DbError } from '../db/interface';
 import { SUBJECT_FLAGS, SUBJECT_FLAGS_O1, type EmittedCode } from '../gate/interface';
 import type { SubjectImage } from '../disasm/interface';
 import {
-  MAX_SWEEP_FLAG_SETS, NoSubject, NotClaimed, UnknownFunction,
+  MAX_PROBE_SOURCES, MAX_SWEEP_FLAG_SETS, NoSubject, NotClaimed, UnknownFunction,
   ParkWithoutReason,
-  type Claimability, type HeldClaim,
+  type Claimability, type HeldClaim, type ProbeOutcome, type ProbeReport,
   type IWork, type SubmitFailure, type SweepComparison, type SweepOutcome,
   type SweepReport,
   type Verdict, type WorkFailure, type WorkItem,
@@ -452,6 +452,7 @@ export class WorkImpl
     return {
       exact: atEntry,
       compiled: v.compiled,
+      matchedAt: v.matchedAt,
       emittedSize: v.emittedSize,
       masked: Option.some(v.masked),
       compared: Option.some(v.compared),
@@ -515,6 +516,91 @@ export class WorkImpl
         `you have never claimed 0x${va.toString(16)}; ` +
         `POST /api/work/claim with {"vas":[${va}]} to take it`,
     });
+  }
+
+  *probe(
+    agentId: string,
+    va: number,
+    sources: ReadonlyArray<string>,
+    flags: string,
+    install?: string,
+  ): EffectGen<ProbeReport, SubmitFailure> {
+    const gate = this.dependencies.Gate;
+    const { size, original } = yield* this.claimed(agentId, va);
+    const asked = sources.slice(0, MAX_PROBE_SOURCES);
+
+    const outcomes: ProbeOutcome[] = [];
+    for (const [index, source] of asked.entries()) {
+      // Sequential, like a sweep: the container is shared, and letting one
+      // diagnostic take it in parallel would stall every other agent's
+      // submissions behind it.
+      //
+      // A source that cannot be built is an outcome, not a failed request --
+      // the whole point of a probe is to submit spellings that might be
+      // wrong, so a compiler rejection is the expected case rather than an
+      // error, and one bad spelling must not discard the other fifteen.
+      const attempted = yield* Effect.result(
+        effunct(function* () {
+          return yield* gate.contribute({ va, original, source, flags, toolchain: install });
+        })(),
+      );
+      if (!Result.isSuccess(attempted)) {
+        const why: unknown = attempted.failure;
+        outcomes.push({
+          index,
+          compiled: false,
+          exact: false,
+          matchedAtEntry: false,
+          emittedSize: Option.none(),
+          masked: Option.none(),
+          firstDiff: Option.none(),
+          emittedSha: Option.none(),
+          detail: Option.some(
+            `could not be built: ${
+              typeof why === 'object' && why !== null && 'reason' in why
+                ? String((why as { reason: unknown }).reason)
+                : String(why)
+            }`,
+          ),
+        });
+        continue;
+      }
+      const v = attempted.success.verdict;
+      outcomes.push({
+        index,
+        compiled: v.compiled,
+        exact: v.exact,
+        matchedAtEntry: Option.getOrElse(v.matchedAt, () => -1) === 0,
+        emittedSize: v.emittedSize,
+        masked: Option.some(v.masked),
+        firstDiff: v.firstDiff,
+        emittedSha: v.emittedSha,
+        detail: v.detail,
+      });
+    }
+
+    // Group by what was EMITTED, not by what was written. Two spellings in one
+    // group are the same program to this compiler, so the axis between them is
+    // inert and nothing is learned by varying it further.
+    const byBytes = new Map<string, number[]>();
+    for (const o of outcomes) {
+      if (Option.isNone(o.emittedSha)) continue;
+      const key = o.emittedSha.value;
+      const group = byBytes.get(key);
+      if (group === undefined) byBytes.set(key, [o.index]);
+      else group.push(o.index);
+    }
+
+    return {
+      va,
+      size,
+      flags,
+      outcomes,
+      matched: outcomes.filter((o) => o.matchedAtEntry).map((o) => o.index),
+      identical: [...byBytes.entries()]
+        .map(([emittedSha, indices]) => ({ emittedSha, indices }))
+        .sort((a, b) => b.indices.length - a.indices.length),
+    };
   }
 
   *claimable(vas: ReadonlyArray<number>): EffectGen<ReadonlyArray<Claimability>, WorkFailure> {
@@ -837,6 +923,7 @@ export class WorkImpl
     return {
       exact: atEntry,
       compiled: v.compiled,
+      matchedAt: v.matchedAt,
       emittedSize: v.emittedSize,
       masked: Option.some(v.masked),
       compared: Option.some(v.compared),

@@ -35,6 +35,24 @@ export const AgentWire = Schema.Struct({
 export const VerdictWire = Schema.Struct({
   exact: Schema.Boolean,
   compiled: Schema.Boolean,
+  /**
+   * Where the emitted bytes matched inside the emitted function, when they
+   * matched anywhere. `0` is the entry, which is the claim a reconstruction of
+   * this address makes; a positive value means the subject's bytes occur
+   * INSIDE a larger emission and is a weaker, different claim; null means
+   * nothing matched.
+   *
+   * `exact` above is already the safe conjunction -- both `submit` and `amend`
+   * return it as "exact AND at the entry", so an agent reading `exact: true`
+   * does hold a proof. What was being discarded is the middle case: a
+   * fragment match arrived as a bare `exact: false`, indistinguishable from
+   * bytes that matched nothing. That is a strong diagnostic to throw away, and
+   * it is the exact shape of the weaker-question failure three agents have
+   * already walked into here -- a reconstruction passing on a correct
+   * sibling's bytes. One of 3,369 exact verdicts sits at a non-zero offset,
+   * and the `proven` view excludes it.
+   */
+  matchedAt: Schema.OptionFromNullOr(Schema.Number),
   emittedSize: Schema.OptionFromNullOr(Schema.Number),
   masked: Schema.OptionFromNullOr(Schema.Number),
   compared: Schema.OptionFromNullOr(Schema.Number),
@@ -176,6 +194,43 @@ export const CompositionRunWire = Schema.Struct({
 
 export const AgentsWire = Schema.Array(AgentWire);
 export const WorkItemsWire = Schema.Array(WorkItemWire);
+
+/**
+ * A probe: many source spellings, one flag set.
+ *
+ * `identical` is the field a caller should read first. A structural question
+ * is "which of these spellings does this compiler treat as the same program",
+ * and grouping the outcomes by the digest of what they emitted answers it
+ * directly -- where nineteen separate sweeps once answered it a round trip at
+ * a time.
+ */
+export const ProbeReportWire = Schema.Struct({
+  va: Schema.Number,
+  size: Schema.Number,
+  flags: Schema.String,
+  outcomes: Schema.Array(
+    Schema.Struct({
+      index: Schema.Number,
+      compiled: Schema.Boolean,
+      exact: Schema.Boolean,
+      matchedAtEntry: Schema.Boolean,
+      emittedSize: Schema.OptionFromNullOr(Schema.Number),
+      masked: Schema.OptionFromNullOr(Schema.Number),
+      firstDiff: Schema.OptionFromNullOr(Schema.Number),
+      emittedSha: Schema.OptionFromNullOr(Schema.String),
+      detail: Schema.OptionFromNullOr(Schema.String),
+    }),
+  ),
+  matched: Schema.Array(Schema.Number),
+  identical: Schema.Array(
+    Schema.Struct({
+      emittedSha: Schema.String,
+      indices: Schema.Array(Schema.Number),
+    }),
+  ),
+});
+
+export const encodeProbe = Schema.encodeUnknownSync(ProbeReportWire);
 
 export const encodeAgents = Schema.encodeUnknownSync(AgentsWire);
 export const encodeVerdict = Schema.encodeUnknownSync(VerdictWire);
