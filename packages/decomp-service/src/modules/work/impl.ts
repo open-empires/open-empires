@@ -5,7 +5,8 @@ import type { DbError } from '../db/interface';
 import { SUBJECT_FLAGS, SUBJECT_FLAGS_O1, type EmittedCode } from '../gate/interface';
 import type { SubjectImage } from '../disasm/interface';
 import {
-  MAX_PROBE_SOURCES, MAX_SWEEP_FLAG_SETS, NoSubject, NotClaimed, UnknownFunction,
+  MAX_PROBE_SOURCES, MAX_SWEEP_FLAG_SETS, NoSubject, NotClaimed, NotStored,
+  UnknownFunction,
   ParkWithoutReason,
   type Claimability, type HeldClaim, type ParkedRecord,
   type ProbeOutcome, type ProbeReport,
@@ -452,37 +453,82 @@ export class WorkImpl
       v.exact && Option.getOrElse(v.matchedAt, () => 0) === 0;
 
     const sourceSha = sha(source);
-    yield* db.run(
-      `INSERT INTO attempts(subject_sha, va, source, source_sha, flags, author, created_at)
-       SELECT c.subject_sha, ?, ?, ?, ?, ?, ? FROM current_config c WHERE c.only_row = 1
-       ON CONFLICT(subject_sha, va, source_sha, flags) DO NOTHING`,
-      [va, source, sourceSha, bucket, agentId, t],
-    );
-    const attemptRow = (yield* db.one(
-      `SELECT a.id AS id FROM attempts a
-       JOIN current_config c ON c.only_row = 1 AND c.subject_sha = a.subject_sha
-       WHERE a.va = ? AND a.source_sha = ? AND a.flags = ?`,
-      [va, sourceSha, bucket],
-    )) as { id: number } | null;
-    if (attemptRow === null) return yield* Effect.fail(new UnknownFunction({ va }));
-    const attemptId = attemptRow.id;
 
-    yield* db.run(
-      `INSERT OR REPLACE INTO verdicts(attempt_id, gate_run_id, exact, compiled,
-         emitted_size, masked, compared, first_diff, detail, decided_at,
-         matched_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-      [
-        attemptId, runId, atEntry ? 1 : 0, v.compiled ? 1 : 0,
-        Option.getOrNull(v.emittedSize), v.masked, v.compared,
-        Option.getOrNull(v.firstDiff), Option.getOrNull(v.detail), t,
-        Option.getOrNull(v.matchedAt),
-      ],
-    );
+    // ONE TRANSACTION. The attempt, the verdict, the claim release and the
+    // near-miss withdrawal were five separate statements, and this method
+    // returned `exact: atEntry` however far down that sequence it had got.
+    //
+    // A worker submitting 87 reconstructions had two come back with a full
+    // positive verdict and NO attempt row and NO verdict row -- during a
+    // window with six compiles running, five queued and one probe taking 83
+    // seconds. Re-submitting the identical source stored them. So the service
+    // reported a proof it had not recorded, twice, and the only reason anyone
+    // noticed is that the worker read every verdict back afterwards.
+    //
+    // The guide already told agents "an empty response is not a verdict".
+    // This is the sharper cousin of that, and the fix belongs here rather
+    // than in a rule agents have to remember: a POSITIVE verdict is not a
+    // stored one unless the store is atomic with it.
+    const attemptId = yield* db.tx<number, DbError | UnknownFunction>(function* () {
+      yield* db.run(
+        `INSERT INTO attempts(subject_sha, va, source, source_sha, flags, author, created_at)
+         SELECT c.subject_sha, ?, ?, ?, ?, ?, ? FROM current_config c WHERE c.only_row = 1
+         ON CONFLICT(subject_sha, va, source_sha, flags) DO NOTHING`,
+        [va, source, sourceSha, bucket, agentId, t],
+      );
+      const attemptRow = (yield* db.one(
+        `SELECT a.id AS id FROM attempts a
+         JOIN current_config c ON c.only_row = 1 AND c.subject_sha = a.subject_sha
+         WHERE a.va = ? AND a.source_sha = ? AND a.flags = ?`,
+        [va, sourceSha, bucket],
+      )) as { id: number } | null;
+      if (attemptRow === null) return yield* Effect.fail(new UnknownFunction({ va }));
+      const id = attemptRow.id;
 
+      yield* db.run(
+        `INSERT OR REPLACE INTO verdicts(attempt_id, gate_run_id, exact, compiled,
+           emitted_size, masked, compared, first_diff, detail, decided_at,
+           matched_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          id, runId, atEntry ? 1 : 0, v.compiled ? 1 : 0,
+          Option.getOrNull(v.emittedSize), v.masked, v.compared,
+          Option.getOrNull(v.firstDiff), Option.getOrNull(v.detail), t,
+          Option.getOrNull(v.matchedAt),
+        ],
+      );
+
+      if (atEntry) {
+        yield* db.run(
+          `UPDATE claims SET released_at = ? WHERE va = ? AND agent_id = ?`,
+          [t, va, agentId],
+        );
+        yield* db.run(`DELETE FROM near_misses WHERE va = ?`, [va]);
+      }
+      return id;
+    });
+
+    // The verdict is only reported once it is READ BACK from the record. The
+    // transaction above makes a partial write impossible; this makes a
+    // reported proof traceable to a stored one, which is the claim the caller
+    // acts on.
     if (atEntry) {
-      yield* db.run(`UPDATE claims SET released_at = ? WHERE va = ? AND agent_id = ?`, [t, va, agentId]);
-      yield* db.run(`DELETE FROM near_misses WHERE va = ?`, [va]);
+      const stored = (yield* db.one(
+        `SELECT 1 AS ok FROM proven p
+         JOIN current_config c ON c.only_row = 1 AND c.subject_sha = p.subject_sha
+         WHERE p.va = ? AND p.attempt_id = ?`,
+        [va, attemptId],
+      )) as { ok: number } | null;
+      if (stored === null) {
+        return yield* Effect.fail(
+          new NotStored({
+            va,
+            reason:
+              `the gate found this source exact at the entry and the record does not ` +
+              `hold it as proven afterwards. Nothing is claimed. Submit it again.`,
+          }),
+        );
+      }
     }
 
     return {

@@ -67,6 +67,24 @@ export class UnknownFunction extends Schema.TaggedError<UnknownFunction>()(
   { va: Schema.Number },
 ) {}
 
+/**
+ * The gate found the source exact at the entry, and the record does not hold
+ * it as proven afterwards.
+ *
+ * This exists because the service did exactly that, twice in 87 submissions,
+ * under load: a full positive verdict with no attempt row and no verdict row
+ * behind it. Re-submitting the identical source stored them, so nothing was
+ * permanently lost -- but a caller that believed the first answer would have
+ * recorded a proof the project does not have.
+ *
+ * It is raised INSTEAD of a positive verdict, never alongside one. A caller
+ * cannot be asked to check whether the answer it was given is true.
+ */
+export class NotStored extends Schema.TaggedError<NotStored>()('NotStored', {
+  va: Schema.Number,
+  reason: Schema.String,
+}) {}
+
 /** No subject has been ingested, so there is nothing to reconstruct against.
  *  A failure, not an empty queue: an empty queue means the work is done. */
 export class NoSubject extends Schema.TaggedError<NoSubject>()('NoSubject', {
@@ -80,7 +98,8 @@ export class NoSubject extends Schema.TaggedError<NoSubject>()('NoSubject', {
  *  for compiles that never ran. */
 export type WorkFailure =
   | DbError | NoSubject | DisasmError | SubjectIoError | SubjectParseError;
-export type SubmitFailure = WorkFailure | GateUnavailable | NotClaimed | UnknownFunction;
+export type SubmitFailure =
+  | WorkFailure | GateUnavailable | NotClaimed | UnknownFunction | NotStored;
 
 export interface WorkItem {
   readonly va: number;
