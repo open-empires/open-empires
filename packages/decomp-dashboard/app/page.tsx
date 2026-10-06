@@ -184,34 +184,63 @@ function Section({
   );
 }
 
-function Chart({ series }: { series: Status['progress'] }) {
+/**
+ * Two series, each against its own total.
+ *
+ * The function count and the byte share move INDEPENDENTLY, and only the
+ * second one is the real measure of progress: a thousand three-byte vtable
+ * stubs move the count and not the share, which is why the work queue was
+ * reordered away from serving them. Drawing one line hid that. Drawing both
+ * against axes whose maxima are the TOTALS -- every known function on the
+ * left, every byte of the executable on the right -- makes the gap between
+ * them the thing you see first.
+ */
+function Chart({
+  series,
+  totalFunctions,
+  totalBytes,
+}: {
+  series: Status['progress'];
+  totalFunctions: number;
+  totalBytes: number;
+}) {
   const pts = series.filter((p) => p.proven > 0);
   if (pts.length < 2) {
     return (
       <div className="chartwrap">
         <div className="empty">
-          Not enough history yet. The line fills in as functions are accepted.
+          Not enough history yet. The lines fill in as functions are accepted.
         </div>
       </div>
     );
   }
-  const W = 940, H = 230, P = { t: 12, r: 14, b: 26, l: 60 };
+  const W = 940, H = 230, P = { t: 12, r: 76, b: 26, l: 62 };
   const xs = pts.map((p) => p.at);
-  const ys = pts.map((p) => p.proven);
   const x0 = Math.min(...xs), x1 = Math.max(...xs);
-  const lo = Math.min(...ys), hi = Math.max(...ys);
-  const y0 = Math.max(0, lo - (hi - lo) * 0.15 - 1);
-  const y1 = hi + (hi - lo) * 0.12 + 1;
-  const X = (t: number) => P.l + ((t - x0) / Math.max(1, x1 - x0)) * (W - P.l - P.r);
-  const Y = (v: number) => H - P.b - ((v - y0) / Math.max(1, y1 - y0)) * (H - P.t - P.b);
 
+  // Both axes run from zero to the TOTAL, so each line's height is literally
+  // the fraction recovered and the two are directly comparable. Guarded
+  // against a zero total so a fresh database cannot divide by it.
+  const fnMax = Math.max(1, totalFunctions);
+  const byMax = Math.max(1, totalBytes);
+  const X = (t: number) => P.l + ((t - x0) / Math.max(1, x1 - x0)) * (W - P.l - P.r);
+  const YL = (v: number) => H - P.b - (v / fnMax) * (H - P.t - P.b);
+  const YR = (v: number) => H - P.b - (v / byMax) * (H - P.t - P.b);
+
+  // One set of gridlines, labelled on BOTH sides: functions at the left,
+  // bytes at the right. The same horizontal line therefore means "a fifth of
+  // the functions" and "a fifth of the bytes" at once.
   const grid = [0, 1, 2, 3, 4].map((i) => {
-    const v = y0 + ((y1 - y0) * i) / 4;
+    const frac = i / 4;
+    const y = H - P.b - frac * (H - P.t - P.b);
     return (
       <g key={`g${i}`}>
-        <line x1={P.l} x2={W - P.r} y1={Y(v)} y2={Y(v)} stroke="var(--line)" />
-        <text x={P.l - 8} y={Y(v) + 3.5} textAnchor="end" fontSize="9.5" fill="var(--dim)">
-          {f(v)}
+        <line x1={P.l} x2={W - P.r} y1={y} y2={y} stroke="var(--line)" />
+        <text x={P.l - 8} y={y + 3.5} textAnchor="end" fontSize="9.5" fill="var(--accent)">
+          {f(Math.round(fnMax * frac))}
+        </text>
+        <text x={W - P.r + 8} y={y + 3.5} textAnchor="start" fontSize="9.5" fill="var(--ok)">
+          {f(Math.round(byMax * frac))}
         </text>
       </g>
     );
@@ -225,27 +254,44 @@ function Chart({ series }: { series: Status['progress'] }) {
       </text>
     );
   });
-  const d = pts
-    .map((p, i) => `${i === 0 ? 'M' : 'L'}${X(p.at)},${Y(p.proven)}`)
-    .join(' ');
+
+  const path = (pick: (p: Status['progress'][number]) => number, Y: (v: number) => number) =>
+    pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${X(p.at)},${Y(pick(p))}`).join(' ');
+  const closed = (d: string) =>
+    `${d} L${X(pts[pts.length - 1]!.at)},${H - P.b} L${X(pts[0]!.at)},${H - P.b} Z`;
+
+  const dFns = path((p) => p.proven, YL);
+  const dBytes = path((p) => p.bytes, YR);
   const last = pts[pts.length - 1]!;
-  const area = `${d} L${X(last.at)},${H - P.b} L${X(pts[0]!.at)},${H - P.b} Z`;
+  const pct = (v: number, total: number) =>
+    total > 0 ? `${((100 * v) / total).toFixed(2)}%` : '--';
 
   return (
     <div className="chartwrap">
       <svg viewBox={`0 0 ${W} ${H}`} role="img"
-           aria-label="functions proven byte-exact over time">
+           aria-label="functions proven and bytes recovered over time, each against its total">
         {grid}
         {ticks}
-        <path d={area} fill="var(--ok)" opacity="0.08" />
-        <path d={d} fill="none" stroke="var(--ok)" strokeWidth="1.8" strokeLinejoin="round" />
-        <circle cx={X(last.at)} cy={Y(last.proven)} r="3" fill="var(--ok)" />
+        {/* Bytes behind, functions in front: the byte line is the lower of the
+            two and would otherwise be hidden under the other's fill. */}
+        <path d={closed(dBytes)} fill="var(--ok)" opacity="0.14" />
+        <path d={dBytes} fill="none" stroke="var(--ok)" strokeWidth="1.8" strokeLinejoin="round" />
+        <path d={closed(dFns)} fill="var(--accent)" opacity="0.14" />
+        <path d={dFns} fill="none" stroke="var(--accent)" strokeWidth="1.8" strokeLinejoin="round" />
+        <circle cx={X(last.at)} cy={YR(last.bytes)} r="3" fill="var(--ok)" />
+        <circle cx={X(last.at)} cy={YL(last.proven)} r="3" fill="var(--accent)" />
       </svg>
       <div className="legend">
+        <span><i style={{ background: 'var(--accent)' }} />
+          functions proven — {f(last.proven)} of {f(totalFunctions)} known
+          ({pct(last.proven, totalFunctions)})</span>
         <span><i style={{ background: 'var(--ok)' }} />
-          functions proven byte-exact — {f(last.proven)}</span>
+          bytes recovered — {f(last.bytes)} of {f(totalBytes)}
+          ({pct(last.bytes, totalBytes)})</span>
         <span className="mut">
-          derived from each function&apos;s own solved-at timestamp, not sampled
+          each axis runs to its own total, so the height of a line is the share
+          recovered; derived from every function&apos;s own solved-at
+          timestamp, not sampled
         </span>
       </div>
     </div>
@@ -315,7 +361,11 @@ export default function Page() {
           </>
         }
       >
-        <Chart series={s.progress} />
+        <Chart
+          series={s.progress}
+          totalFunctions={s.phase2.inventory}
+          totalBytes={s.phase2.textSpan}
+        />
       </Section>
 
       <Section
