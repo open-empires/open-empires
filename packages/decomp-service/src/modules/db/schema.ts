@@ -1845,4 +1845,32 @@ ALTER TABLE near_misses ADD COLUMN source TEXT;
               WHERE name = 'source'`,
     verifyExpects: 'nonzero',
   },
+  {
+    id: '026-pointer-coverage-resolvable',
+    sql: `
+-- TWO QUESTIONS WERE BEING REPORTED AS ONE.
+--
+-- attributed counts a pointer dword as accounted for when its own address
+-- falls inside a global the PROGRAM names -- one evidenced by a literal in
+-- its own code or by a library symbol table, and sized. A global evidenced
+-- only by the pointer values is excluded on purpose, because its extent was
+-- inferred from the very dwords being counted.
+--
+-- That is a real measure of how well understood the data region is, and it
+-- was being read as something else entirely: the browser build's dependency.
+-- It is not. The build resolves an address through GPTR(address) and needs an
+-- extent to resolve INTO, pointer-derived or otherwise -- and by that measure
+-- 1,874 of 1,875 data pointers and 13,259 of 13,259 code pointers already
+-- resolve. The single exception is 0x682090, a 4-byte CRT pointer in the hole
+-- between __pctype and __ctype that no archive member names.
+--
+-- The figure as reported, 110 of 1,875, was relayed to the project's owner as
+-- the worst-covered dependency of step 4. Both columns exist now so neither
+-- can be read as the other.
+ALTER TABLE globals_pointer_coverage ADD COLUMN resolvable INTEGER NOT NULL DEFAULT 0;
+`,
+    verify: `SELECT COUNT(*) AS present FROM pragma_table_info('globals_pointer_coverage')
+              WHERE name = 'resolvable'`,
+    verifyExpects: 'nonzero',
+  },
 ];

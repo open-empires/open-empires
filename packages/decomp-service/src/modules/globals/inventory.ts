@@ -421,8 +421,24 @@ const resolveHolds = (input: {
  * evidenced by a literal in its own code or by a library's symbol table, and
  * sized. A global evidenced only by the pointer values is excluded on
  * purpose: its extent was inferred from the very dwords being counted, so
- * including it would make this number measure nothing and report 100%. The
- * difference between the two columns is the real remaining gap.
+ * including it would make this number measure nothing and report 100%.
+ *
+ * `resolvable` is the subset falling inside ANY global with a settled extent,
+ * pointer-derived ones included, and it is a different question that was
+ * being answered nowhere.
+ *
+ * The distinction matters because the two were being conflated. `attributed`
+ * reads 110 of 1,875 for data, and that was reported -- including by me, to
+ * the project's owner -- as the browser build's worst-covered dependency.
+ * It is not: the build resolves an address through `GPTR(address)` and needs
+ * an extent to resolve INTO, which is `resolvable`, and that is 1,874 of
+ * 1,875 for data and 13,259 of 13,259 for code. The single exception is
+ * 0x682090, a 4-byte CRT pointer in the hole between `__pctype` and
+ * `__ctype` that no archive member names.
+ *
+ * So `attributed` measures how much of the data region the CODE names, which
+ * is a real question about how well understood the data is, and not a
+ * blocker for step 4. Both are reported so neither can be read as the other.
  */
 export const pointerCoverage = (input: {
   readonly entries: ReadonlyArray<GlobalEntry>;
@@ -432,15 +448,37 @@ export const pointerCoverage = (input: {
   readonly target: 'code' | 'data';
   readonly enumerated: number;
   readonly attributed: number;
+  readonly resolvable: number;
 }> => {
-  const spans = input.entries
-    .flatMap((e) =>
-      Option.isSome(e.size) && e.evidence !== 'pointer-dword'
-        ? [{ lo: e.address, hi: e.address + e.size.value }]
-        : [],
-    )
-    .sort((a, b) => a.lo - b.lo);
-  const inside = (va: number): boolean => {
+  /**
+   * Disjoint spans, because the binary search below requires it.
+   *
+   * It did not have it. Thirteen of these globals NEST -- a dword read with a
+   * stated width inside a library array or a pointer table the code also
+   * names -- and a binary search over intervals sorted by `lo` is only
+   * correct while none contains another. Sorted spans [10,100), [20,30),
+   * [200,300) and a query for 50 lands on [20,30), steps right past
+   * [10,100), and answers false.
+   *
+   * It cost 17 of the data column, which read 93 where an exact test gives
+   * 110. Code was unaffected at 11,403 either way, which is what hid it:
+   * only one of the two columns was wrong, so nothing looked inconsistent.
+   */
+  const disjoint = (
+    ranges: ReadonlyArray<{ lo: number; hi: number }>,
+  ): ReadonlyArray<{ lo: number; hi: number }> => {
+    const sorted = [...ranges].sort((a, b) => a.lo - b.lo || a.hi - b.hi);
+    const out: Array<{ lo: number; hi: number }> = [];
+    for (const r of sorted) {
+      const last = out[out.length - 1];
+      if (last !== undefined && r.lo <= last.hi) last.hi = Math.max(last.hi, r.hi);
+      else out.push({ lo: r.lo, hi: r.hi });
+    }
+    return out;
+  };
+  const containing = (
+    spans: ReadonlyArray<{ lo: number; hi: number }>,
+  ): ((va: number) => boolean) => (va: number): boolean => {
     let lo = 0;
     let hi = spans.length - 1;
     while (lo <= hi) {
@@ -452,11 +490,22 @@ export const pointerCoverage = (input: {
     }
     return false;
   };
-  const tally = { code: { enumerated: 0, attributed: 0 }, data: { enumerated: 0, attributed: 0 } };
+
+  const sized = input.entries.flatMap((e) =>
+    Option.isSome(e.size) ? [{ lo: e.address, hi: e.address + e.size.value, ev: e.evidence }] : [],
+  );
+  const named = containing(disjoint(sized.filter((s) => s.ev !== 'pointer-dword')));
+  const anyExtent = containing(disjoint(sized));
+
+  const tally = {
+    code: { enumerated: 0, attributed: 0, resolvable: 0 },
+    data: { enumerated: 0, attributed: 0, resolvable: 0 },
+  };
   for (const candidate of input.candidates) {
     const bucket = tally[input.isCode(candidate.value) ? 'code' : 'data'];
     bucket.enumerated += 1;
-    if (inside(candidate.address)) bucket.attributed += 1;
+    if (named(candidate.address)) bucket.attributed += 1;
+    if (anyExtent(candidate.address)) bucket.resolvable += 1;
   }
   return [
     { target: 'code' as const, ...tally.code },

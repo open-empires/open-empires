@@ -281,6 +281,20 @@ export interface GlobalsReport {
     readonly target: 'code' | 'data';
     readonly enumerated: number;
     readonly attributed: number;
+    /**
+     * Pointer dwords falling inside ANY global with a settled extent,
+     * pointer-derived ones included.
+     *
+     * A different question from `attributed`, and the one step 4 actually
+     * depends on: the browser build resolves an address through
+     * `GPTR(address)` and needs an extent to resolve INTO, not a global the
+     * code happens to name. 1,874 of 1,875 data pointers and 13,259 of
+     * 13,259 code pointers satisfy it. `attributed` reads 110 of 1,875 and
+     * was relayed as the build's worst-covered dependency; it is a measure of
+     * how well understood the data is, which is a real question and not that
+     * one.
+     */
+    readonly resolvable: number;
   }>;
   readonly librarySymbols: number;
   readonly libraryRefusals: ReadonlyArray<{ readonly reason: string; readonly count: number }>;
@@ -302,6 +316,20 @@ export interface GlobalsSummary {
     readonly target: string;
     readonly enumerated: number;
     readonly attributed: number;
+    /**
+     * Pointer dwords falling inside ANY global with a settled extent,
+     * pointer-derived ones included.
+     *
+     * A different question from `attributed`, and the one step 4 actually
+     * depends on: the browser build resolves an address through
+     * `GPTR(address)` and needs an extent to resolve INTO, not a global the
+     * code happens to name. 1,874 of 1,875 data pointers and 13,259 of
+     * 13,259 code pointers satisfy it. `attributed` reads 110 of 1,875 and
+     * was relayed as the build's worst-covered dependency; it is a measure of
+     * how well understood the data is, which is a real question and not that
+     * one.
+     */
+    readonly resolvable: number;
   }>;
   readonly byEvidence: ReadonlyArray<{ readonly evidence: string; readonly globals: number }>;
 }

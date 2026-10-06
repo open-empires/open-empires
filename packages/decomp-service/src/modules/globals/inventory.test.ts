@@ -245,8 +245,8 @@ test('a pointer dword counts as attributed only to a global the program names', 
   expect(
     pointerCoverage({ entries: named.entries, candidates: slots, isCode }),
   ).toEqual([
-    { target: 'code', enumerated: 2, attributed: 2 },
-    { target: 'data', enumerated: 0, attributed: 0 },
+    { target: 'code', enumerated: 2, attributed: 2, resolvable: 2 },
+    { target: 'data', enumerated: 0, attributed: 0, resolvable: 0 },
   ]);
 
   // The same bytes with nothing naming them. The run's extent was inferred
@@ -256,9 +256,41 @@ test('a pointer dword counts as attributed only to a global the program names', 
   expect(
     pointerCoverage({ entries: unnamed.entries, candidates: slots, isCode }),
   ).toEqual([
-    { target: 'code', enumerated: 2, attributed: 0 },
-    { target: 'data', enumerated: 0, attributed: 0 },
+    // Nothing NAMES them, so `attributed` is 0 -- but the run's extent is
+    // settled, so the browser build has somewhere to resolve them into and
+    // `resolvable` is 2. The two columns answer different questions and this
+    // is the case that separates them.
+    { target: 'code', enumerated: 2, attributed: 0, resolvable: 2 },
+    { target: 'data', enumerated: 0, attributed: 0, resolvable: 0 },
   ]);
+});
+
+test('a pointer inside a NESTED global is still found', () => {
+  // A binary search over spans sorted by `lo` is only correct while no span
+  // contains another. Thirteen of the real globals nest, and the search
+  // stepped past the outer one: it cost 17 of the data column, which read 93
+  // where an exact test gives 110. Code was unaffected either way, which is
+  // what hid it.
+  const outer = 0x660000;
+  const inner = outer + 0x40;
+  const slot = candidate(inner + 4, 0x410000, inner, 2);
+  const inventory = assemble({
+    references: [
+      // The outer array: named, and sized by an access width.
+      reference({ address: outer, form: 'immediate', width: Option.none() }),
+      reference({ address: outer, width: Option.some(0x100) }),
+      // A dword read inside it with its own stated width -- the nesting.
+      reference({ address: inner, width: Option.some(4) }),
+    ],
+    pointerCandidates: [slot],
+  });
+  const [code] = pointerCoverage({
+    entries: inventory.entries,
+    candidates: [slot],
+    isCode,
+  });
+  expect(code?.enumerated).toBe(1);
+  expect(code?.resolvable).toBe(1);
 });
 
 test('an address in no section is not a global and says so', () => {

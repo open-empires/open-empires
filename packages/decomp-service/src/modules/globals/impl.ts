@@ -94,6 +94,7 @@ const PointerCoverageRow = Schema.Struct({
   target: Schema.String,
   enumerated: Schema.Number,
   attributed: Schema.Number,
+  resolvable: Schema.Number,
 });
 const EvidenceCountRow = Schema.Struct({
   evidence: Schema.String,
@@ -430,12 +431,14 @@ export class GlobalsImpl
     // and it is the difference between measuring the gap and reporting 100%.
     for (const p of report.pointers) {
       yield* this.dependencies.Db.run(
-        `INSERT INTO globals_pointer_coverage(subject_sha, at, target, enumerated, attributed)
-         VALUES (?,?,?,?,?)
+        `INSERT INTO globals_pointer_coverage(subject_sha, at, target, enumerated,
+                                              attributed, resolvable)
+         VALUES (?,?,?,?,?,?)
          ON CONFLICT(subject_sha, target) DO UPDATE SET
            at = excluded.at, enumerated = excluded.enumerated,
-           attributed = excluded.attributed`,
-        [sha, Date.now() / 1000, p.target, p.enumerated, p.attributed],
+           attributed = excluded.attributed,
+           resolvable = excluded.resolvable`,
+        [sha, Date.now() / 1000, p.target, p.enumerated, p.attributed, p.resolvable],
       );
     }
     return report;
@@ -459,7 +462,7 @@ export class GlobalsImpl
     const coverage = yield* rows(
       db,
       PointerCoverageRow,
-      `SELECT target, enumerated, attributed FROM globals_pointer_coverage
+      `SELECT target, enumerated, attributed, resolvable FROM globals_pointer_coverage
         WHERE subject_sha = ? ORDER BY target`,
       [sha],
     );
@@ -483,6 +486,7 @@ export class GlobalsImpl
         target: c.target,
         enumerated: c.enumerated,
         attributed: c.attributed,
+        resolvable: c.resolvable,
       })),
       byEvidence: evidence.map((e) => ({ evidence: e.evidence, globals: e.globals })),
     };

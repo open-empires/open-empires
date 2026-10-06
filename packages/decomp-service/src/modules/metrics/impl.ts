@@ -297,6 +297,14 @@ export class MetricsImpl
          (SELECT COUNT(*) FROM import_bindings WHERE api IS NOT NULL)     AS named_sites,
          (SELECT COALESCE(SUM(enumerated - attributed), 0)
             FROM globals_pointer_coverage WHERE target = 'data')          AS unattributed_ptrs,
+         -- The figure step 4 actually depends on. A pointer the browser build
+         -- cannot resolve is one with no extent to resolve INTO; a pointer
+         -- the CODE does not name is a different and lesser problem, and
+         -- reporting only the second as a blocker overstated it by 1,764.
+         (SELECT COALESCE(SUM(enumerated - resolvable), 0)
+            FROM globals_pointer_coverage)                                AS unresolvable_ptrs,
+         (SELECT COALESCE(SUM(enumerated), 0)
+            FROM globals_pointer_coverage)                                AS ptrs_all,
          (SELECT COALESCE(SUM(enumerated), 0)
             FROM globals_pointer_coverage WHERE target = 'data')          AS ptrs_total,
          (SELECT COUNT(*) FROM port_stranded_literals)                    AS stranded,
@@ -317,6 +325,8 @@ export class MetricsImpl
       importSlotsTotal: num(row?.slots_total),
       namedCallSites: num(row?.named_sites),
       unattributedDataPointers: num(row?.unattributed_ptrs),
+      unresolvablePointers: num(row?.unresolvable_ptrs),
+      pointersTotal: num(row?.ptrs_all),
       dataPointersTotal: num(row?.ptrs_total),
       strandedLiterals: num(row?.stranded),
       strandedInFunctions: num(row?.stranded_fns),

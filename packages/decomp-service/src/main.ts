@@ -690,7 +690,14 @@ const routes = async (req: Request): Promise<Response> => {
             return { ok: false, error: `${raw} is not an address` };
           }
           const asked = Number(url.searchParams.get('bytes') ?? 64);
-          const length = Math.min(Math.max(Number.isFinite(asked) ? asked : 64, 1), 4096);
+          // The cap is SAID, not silently applied. It used to clamp to 4,096
+          // without a word, and a worker reading a 7,647-byte function got
+          // 4,096 bytes of listing and concluded the function did not decode
+          // -- then paged by VA to work around a limit nothing had mentioned.
+          const CAP = 4096;
+          const wanted = Number.isFinite(asked) ? asked : 64;
+          const length = Math.min(Math.max(wanted, 1), CAP);
+          const truncated = wanted > CAP;
           const subject = yield* modules.Subject;
           const current = yield* subject.current();
           if (Option.isNone(current)) {
@@ -731,6 +738,21 @@ const routes = async (req: Request): Promise<Response> => {
           return {
             va: `0x${va.toString(16)}`,
             bytes: length,
+            // Said out loud when the request was cut down. A worker asked for
+            // 7,647 bytes, silently got 4,096, and read the short listing as
+            // the function failing to decode.
+            ...(truncated
+              ? {
+                  truncated: {
+                    asked: wanted,
+                    cap: CAP,
+                    continueAt: `0x${(va + length).toString(16)}`,
+                    note:
+                      `a listing is capped at ${CAP} bytes; ask again from ` +
+                      `continueAt for the rest`,
+                  },
+                }
+              : {}),
             listing,
             insideKnownFunction:
               c === null

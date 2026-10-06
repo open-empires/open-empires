@@ -156,7 +156,20 @@ export interface Blockers {
   /** Pointers stored inside the data region that cannot be placed inside a
    *  variable whose extent is settled. The browser build has to resolve every
    *  one of them. */
+  /** Data pointers no global the CODE names accounts for. A measure of how
+   *  well understood the data region is -- NOT what step 4 depends on, and
+   *  it was reported as though it were. */
   readonly unattributedDataPointers: number;
+  /**
+   * Pointers with no extent to resolve into, which IS what step 4 depends
+   * on: the browser build rewrites an absolute address as `GPTR(address)`
+   * and needs a variable of known size at the other end.
+   *
+   * 1 of 15,134. The other figure reads 1,765 of 1,875 and was relayed as
+   * the build's worst-covered dependency, overstating it by 1,764.
+   */
+  readonly unresolvablePointers: number;
+  readonly pointersTotal: number;
   readonly dataPointersTotal: number;
   /**
    * Literal addresses in the portable rendering that the rewrite does not
