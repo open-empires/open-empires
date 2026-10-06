@@ -62,12 +62,74 @@ const TERMINATORS = new Set(['ret', 'retf', 'jmp']);
  * Four real functions were rejected as interior to those four extents as a
  * result.
  */
-const paddingRun = (bytes: Uint8Array, off: number): number => {
+/**
+ * Length of a `lea r,[r+0]` filler at `off`, or 0 if there is not one.
+ *
+ * Four encodings, all of which MSVC 6 uses to align what follows:
+ *
+ *     8d 49 00                 lea ecx,[ecx+0]        3 bytes
+ *     8d 64 24 00              lea esp,[esp+0]        4 bytes (SIB)
+ *     8d 80 00 00 00 00        lea eax,[eax+0]        6 bytes (disp32)
+ *     8d a4 24 00 00 00 00     lea esp,[esp+0]        7 bytes (SIB + disp32)
+ *
+ * The test is the ModRM, not the byte string: mod must be 01 or 10 (a
+ * displacement is present), reg must equal r/m (the register is leaed from
+ * itself), and every displacement byte must be zero.
+ */
+const leaFillerLength = (bytes: Uint8Array, off: number): number => {
+  const modrm = bytes[off + 1];
+  if (modrm === undefined) return 0;
+  const mod = modrm >> 6;
+  const reg = (modrm >> 3) & 7;
+  const rm = modrm & 7;
+  if (mod !== 1 && mod !== 2) return 0;
+  if (reg !== rm) return 0;
+  // rm == 4 means a SIB byte follows, and for `[r+0]` it must encode that
+  // same register as the base with no index: 0x24 is base=esp/index=none,
+  // and in general (index == 4) with base == reg.
+  let at = off + 2;
+  if (rm === 4) {
+    const sib = bytes[at];
+    if (sib === undefined) return 0;
+    const index = (sib >> 3) & 7;
+    const base = sib & 7;
+    if (index !== 4 || base !== reg) return 0;
+    at += 1;
+  }
+  const dispBytes = mod === 1 ? 1 : 4;
+  for (let k = 0; k < dispBytes; k += 1) {
+    if (bytes[at + k] !== 0) return 0;
+  }
+  return at + dispBytes - off;
+};
+
+export const paddingRun = (bytes: Uint8Array, off: number): number => {
   let n = 0;
   while (off + n < bytes.length) {
     const b = bytes[off + n]!;
     if (PAD.has(b)) { n += 1; continue; }
     if (b === 0x8b && bytes[off + n + 1] === 0xff) { n += 2; continue; }
+    // `lea r,[r+0]` -- a THIRD filler form, and the one that aligns a
+    // function's own jump table to a dword.
+    //
+    // At 0x54F530 the `ret 4` at 0x54F7DA is followed by `8d 49 00` and then
+    // an 11-entry table at 0x54F7E0: without this the function cannot be
+    // closed at all and its 688 bytes read as unreachable residue. Measured
+    // across every residue head, the four encodings are worth 32,258 bytes
+    // that become recordable, and they cost nothing: 594 of 600 random proven
+    // sizes come out exact with and without them, 0 short and 0 long either
+    // way.
+    //
+    // Matched by the RULE rather than by four byte strings: opcode 0x8D with a
+    // ModRM whose reg field equals its r/m field and a zero displacement. A
+    // `lea` of a register from itself with no offset computes nothing, so a
+    // compiler emits it only as filler -- which is why it is safe to end a
+    // function on, and why listing the canonical encodings would have missed
+    // whichever register the next one happens to use.
+    if (b === 0x8d) {
+      const lea = leaFillerLength(bytes, off + n);
+      if (lea > 0) { n += lea; continue; }
+    }
     break;
   }
   return n;

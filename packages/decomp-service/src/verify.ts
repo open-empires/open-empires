@@ -25,6 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Effect, Layer, Option, pipe } from 'effect';
 import { modules } from './modules';
+import { paddingRun } from './modules/disasm/discovery';
 import { ComposeImpl } from './modules/compose/impl';
 import { DbImpl } from './modules/db/impl';
 import { DisasmImpl } from './modules/disasm/impl';
@@ -307,6 +308,7 @@ const program = Effect.gen(function* () {
         return found;
       };
       let exact = 0;
+      let paddingInclusive = 0;
       let short = 0;
       let long = 0;
       let unmeasured = 0;
@@ -319,11 +321,34 @@ const program = Effect.gen(function* () {
           continue;
         }
         if (got.value === f.size) { exact += 1; continue; }
-        if (got.value < f.size) short += 1; else long += 1;
+        // A measurement that stops at the terminator while the RECORDED
+        // extent runs on through the trailing filler is not a truncation, and
+        // calling it one would make this audit fail on a benign difference.
+        //
+        // Two proven functions are recorded that way: 0x617070 and 0x61C190
+        // are 7 bytes of code -- `push edi`, `mov edi,[esp+8]`, `jmp` --
+        // followed by a 7-byte `lea esp,[esp]` and a 2-byte `mov edi,edi`,
+        // and their recorded size is 16. Both are hand-written assembly
+        // transcriptions, and the author counted the padding in. Every one of
+        // the other 3,527 records the code length alone, which is the
+        // project's convention.
+        //
+        // So the two are separated by arithmetic rather than by a list of
+        // addresses: measured + the filler run immediately after it equals
+        // the recorded size. Nothing else satisfies that by accident.
+        if (got.value < f.size) {
+          const after = f.va + got.value - img.imageBase;
+          if (got.value + paddingRun(img.bytes, after) === f.size) {
+            paddingInclusive += 1;
+            continue;
+          }
+          short += 1;
+        } else long += 1;
         if (wrong.length < 12) wrong.push({ va: f.va, want: f.size, got: String(got.value) });
       }
       console.log(row('proven functions', proven.length));
       console.log(row('measured exactly', exact));
+      console.log(row('recorded extent includes its filler', paddingInclusive));
       console.log(row('measured SHORT', short));
       console.log(row('measured LONG', long));
       console.log(row('not measurable at all', unmeasured));

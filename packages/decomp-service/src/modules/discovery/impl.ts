@@ -259,7 +259,25 @@ export class DiscoveryImpl
     // 0x00 is counted as padding too: the linker zero-fills to a boundary,
     // and `00 00` decodes as a valid instruction, which is exactly how
     // unreadable bytes once became phantom entries.
+    // TWO SETS, because 0x00 is padding for one question and not the other.
+    //
+    // A gap that is nothing but 0x90, 0xCC or 0x00 is filler: the linker
+    // zero-fills to a boundary, so zero belongs in the whole-gap test.
+    //
+    // It does NOT belong in the boundary split, and that cost a round. 0x00 is
+    // the top byte of a disp32: at `8b 0d 84 0f 76 00` -- `mov ecx,[0x760F84]`
+    // -- the trailing zero made the next address look like the end of a
+    // padding run landing on a 16-byte boundary. It is `push esi`, mid basic
+    // block, 848 bytes inside the function at 0x5628F0, and it was recorded as
+    // a 772-byte function of its own. Of 63 entries one harvest added, 61 were
+    // not functions and 55 of them were preceded only by zero bytes. A worker
+    // had to reject all 61.
+    //
+    // The inverse test is not available as a guard: 125 of 3,276 16-aligned
+    // PROVEN functions are also preceded only by zeros, so "preceded by zeros"
+    // cannot reject an entry either. Only excluding zero from the split works.
     const PAD = new Set([0x90, 0xcc, 0x00]);
+    const BOUNDARY_PAD = new Set([0x90, 0xcc]);
     const byteAt = (va: number): number | undefined => img.bytes[va - img.imageBase];
 
     const report = {
@@ -321,10 +339,10 @@ export class DiscoveryImpl
       const bounds: number[] = [gapLo];
       for (let va = gapLo; va < gapHi; va++) {
         const b = byteAt(va);
-        if (b === undefined || !PAD.has(b)) continue;
+        if (b === undefined || !BOUNDARY_PAD.has(b)) continue;
         let end = va;
-        while (end < gapHi && PAD.has(byteAt(end) ?? 0)) end += 1;
-        if (end % 16 === 0 && end < gapHi && !PAD.has(byteAt(end) ?? 0x90)) {
+        while (end < gapHi && BOUNDARY_PAD.has(byteAt(end) ?? 0)) end += 1;
+        if (end % 16 === 0 && end < gapHi && !BOUNDARY_PAD.has(byteAt(end) ?? 0x90)) {
           bounds.push(end);
         }
         va = end;
@@ -335,7 +353,7 @@ export class DiscoveryImpl
         const at = bounds[k]!;
         const until = bounds[k + 1]!;
         const b = byteAt(at);
-        if (b === undefined || PAD.has(b) || rejected.has(at)) continue;
+        if (b === undefined || BOUNDARY_PAD.has(b) || rejected.has(at)) continue;
 
         // MEASURED AT ONE BOUNDARY ONLY, and the alternative was tried.
         //
