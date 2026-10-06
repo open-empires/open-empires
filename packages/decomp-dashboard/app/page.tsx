@@ -42,6 +42,8 @@ interface Status {
     importSlotsTotal: number;
     namedCallSites: number;
     unattributedDataPointers: number;
+    unresolvablePointers: number;
+    pointersTotal: number;
     dataPointersTotal: number;
     strandedLiterals: number;
     strandedInFunctions: number;
@@ -433,9 +435,9 @@ export default function Page() {
           />
           <Card
             label="stored pointers unresolved"
-            value={`${f(s.blockers.unattributedDataPointers)} / ${f(s.blockers.dataPointersTotal)}`}
-            stale={s.blockers.unattributedDataPointers > 0}
-            prov="pointers inside the game's data that we cannot yet place inside a variable of known extent. The browser build has to resolve every one. This only closes as more routines are rebuilt — there is no shortcut"
+            value={`${f(s.blockers.unresolvablePointers)} / ${f(s.blockers.pointersTotal)}`}
+            stale={s.blockers.unresolvablePointers > 0}
+            prov={`pointers with nowhere to resolve to. The browser build rewrites each absolute address the game uses into an offset inside the loaded data, which needs a variable of known extent at the other end. This card used to show a different figure — ${f(s.blockers.unattributedDataPointers)} data pointers that no variable the CODE names accounts for — which is a fair measure of how well understood the data is, and was being read as this one. It overstated the build's problem by three orders of magnitude`}
           />
           <Card
             label="addresses the browser build cannot resolve"
