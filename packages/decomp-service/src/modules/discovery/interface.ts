@@ -253,6 +253,30 @@ export interface IDiscovery {
    * evidence of an entry than any rule here; a rejection that could overrule
    * a proof would let a judgement delete a fact.
    */
+  /**
+   * Withdraw a rejection, so the address can be recorded as an entry again.
+   *
+   * A rejection is enforced by a trigger that raises IGNORE on every insert
+   * into `functions` for that address, which makes it permanent: there was no
+   * way to undo one. A worker then rejected four real functions -- 0x565DB0,
+   * 0x566080, 0x566420 and 0x567A30 -- because the extents it measured around
+   * them were too long, and found out afterwards. It deliberately did NOT
+   * reject the four over-long entries it had recorded, because doing so would
+   * have blocked the real functions inside them from ever entering the
+   * inventory at all. Both halves of that correction needed this.
+   *
+   * It takes a reason of its own. A rejection carried the decode that
+   * justified it, and withdrawing one without saying why would leave the
+   * record claiming the opposite of what someone decided, with nothing to
+   * weigh against it.
+   */
+  unreject(
+    entries: ReadonlyArray<{ readonly va: number; readonly reason: string }>,
+  ): EffectGen<
+    ReadonlyArray<{ readonly va: number; readonly withdrawn: boolean; readonly because: string }>,
+    DbError | DiscoveryFailed
+  >;
+
   reject(entries: ReadonlyArray<{ readonly va: number; readonly reason: string }>):
     EffectGen<ReadonlyArray<RejectionOutcome>, DbError | DisasmError | SubjectIoError | SubjectParseError | DiscoveryFailed>;
 

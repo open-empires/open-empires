@@ -423,6 +423,46 @@ export class DiscoveryImpl
     return row.subject_sha;
   }
 
+  *unreject(
+    entries: ReadonlyArray<{ readonly va: number; readonly reason: string }>,
+  ): EffectGen<
+    ReadonlyArray<{ readonly va: number; readonly withdrawn: boolean; readonly because: string }>,
+    DbError | DiscoveryFailed
+  > {
+    const db = this.dependencies.Db;
+    const sha = yield* this.subjectSha();
+    const out: Array<{ va: number; withdrawn: boolean; because: string }> = [];
+    for (const e of entries) {
+      if (e.reason.trim() === '') {
+        out.push({
+          va: e.va,
+          withdrawn: false,
+          because: 'a withdrawal needs a reason: the rejection it undoes carried its own evidence',
+        });
+        continue;
+      }
+      const removed = yield* db.run(
+        'DELETE FROM rejected_entries WHERE subject_sha = ? AND va = ?',
+        [sha, e.va],
+      );
+      if (removed === 0) {
+        out.push({
+          va: e.va,
+          withdrawn: false,
+          because: `0x${e.va.toString(16)} is not recorded as rejected, so there is nothing to withdraw`,
+        });
+        continue;
+      }
+      // The withdrawal is itself recorded, in the same place agents read the
+      // history from: an address that was rejected and then un-rejected is a
+      // different thing from one nobody ever doubted, and the next worker to
+      // measure it should be able to see that someone has been here.
+      console.log(`[discovery] rejection of 0x${e.va.toString(16)} withdrawn: ${e.reason}`);
+      out.push({ va: e.va, withdrawn: true, because: e.reason });
+    }
+    return out;
+  }
+
   *reject(
     entries: ReadonlyArray<{ readonly va: number; readonly reason: string }>,
   ): EffectGen<ReadonlyArray<RejectionOutcome>, Failure> {

@@ -250,6 +250,99 @@ const program = Effect.gen(function* () {
     }
   }
 
+  /**
+   * Does the extent measurement reproduce the sizes of functions we have
+   * PROVED?
+   *
+   * `body()` decides where a function ends, and every inventory entry and
+   * every gap correction rests on it. Its only ground truth is the proven
+   * set: a function whose source compiles to the subject's bytes at its
+   * address has, by construction, the extent the record says.
+   *
+   * This exists because a worker extended the measurement and guarded the
+   * result by checking that the service's own `body()` agreed with its
+   * independent derivation -- and the two agreed on the same WRONG answer
+   * four times, because both shared the same incomplete padding set. A guard
+   * that is not independent is not a guard. The proven set is independent of
+   * both.
+   */
+  if (wants('extents')) {
+    const subject = yield* (yield* modules.Subject).current();
+    const disasm = yield* modules.Disasm;
+    const db = yield* modules.Db;
+    console.log(rule('extents -- does the measurement reproduce PROVEN sizes'));
+    if (Option.isNone(subject)) {
+      console.log('  no subject is configured, so there is nothing to measure against');
+    } else {
+      const s0 = subject.value;
+      const img = {
+        sha256: s0.sha256,
+        bytes: yield* (yield* modules.Subject).imageBytes(),
+        imageBase: s0.imageBase,
+        textLo: s0.textLo,
+        textHi: s0.textHi,
+      };
+      const proven = (yield* db.all(
+        `SELECT p.va AS va, p.size AS size FROM proven p
+         JOIN current_config c ON c.only_row = 1 AND c.subject_sha = p.subject_sha
+         ORDER BY p.va`,
+      )) as ReadonlyArray<{ va: number; size: number }>;
+      // Bounded by the NEXT inventory entry, which is what every caller of
+      // measureExtent passes. Measuring to the end of .text once returned
+      // 12,474 bytes for a 61-byte function.
+      const entries = (yield* db.all(
+        `SELECT f.va AS va FROM functions f
+         JOIN current_config c ON c.only_row = 1 AND c.subject_sha = f.subject_sha
+         WHERE f.size > 0 ORDER BY f.va`,
+      )) as ReadonlyArray<{ va: number }>;
+      const starts = entries.map((e) => e.va);
+      const nextAfter = (va: number): number => {
+        let lo = 0;
+        let hi = starts.length - 1;
+        let found = img.textHi;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (starts[mid]! > va) { found = starts[mid]!; hi = mid - 1; } else lo = mid + 1;
+        }
+        return found;
+      };
+      let exact = 0;
+      let short = 0;
+      let long = 0;
+      let unmeasured = 0;
+      const wrong: Array<{ va: number; want: number; got: string }> = [];
+      for (const f of proven) {
+        const got = yield* disasm.measureExtent(img, f.va, nextAfter(f.va));
+        if (Option.isNone(got)) {
+          unmeasured += 1;
+          if (wrong.length < 12) wrong.push({ va: f.va, want: f.size, got: 'no measurement' });
+          continue;
+        }
+        if (got.value === f.size) { exact += 1; continue; }
+        if (got.value < f.size) short += 1; else long += 1;
+        if (wrong.length < 12) wrong.push({ va: f.va, want: f.size, got: String(got.value) });
+      }
+      console.log(row('proven functions', proven.length));
+      console.log(row('measured exactly', exact));
+      console.log(row('measured SHORT', short));
+      console.log(row('measured LONG', long));
+      console.log(row('not measurable at all', unmeasured));
+      for (const w of wrong) {
+        console.log(`    ${hex(w.va)}  proved ${w.want}, measured ${w.got}`);
+      }
+      console.log(
+        '\n  a size that disagrees with a proof is a measurement that would ' +
+          'record a wrong extent for an unproven neighbour.',
+      );
+      // SHORT is the failure that matters: it truncates a function and puts an
+      // entry in the inventory that cannot be reconstructed at all. LONG and
+      // unmeasured are reported and not failed, because a bound that is too
+      // generous is corrected by the next entry and 103 stretches are known to
+      // be unmeasurable for reasons recorded in PLAN.md.
+      if (short > 0) failures += 1;
+    }
+  }
+
   if (wants('imports')) {
     const r = yield* (yield* modules.ImportNames).nameImportSlots();
     console.log(rule('import names -- read out of the libraries\' own relocation tables'));

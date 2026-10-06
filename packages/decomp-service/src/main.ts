@@ -779,6 +779,23 @@ const routes = async (req: Request): Promise<Response> => {
           // An entry an agent established by reading the bytes. Checked, not
           // trusted: it must decode, it must measure, and it must not sit
           // inside a function that has a proof.
+          if (seg[2] === 'unreject') {
+            const entries = Array.isArray(body.entries)
+              ? body.entries.flatMap((e) => {
+                  const o = e as { va?: unknown; reason?: unknown };
+                  return typeof o.va === 'number' && typeof o.reason === 'string'
+                    ? [{ va: o.va, reason: o.reason }]
+                    : [];
+                })
+              : [];
+            if (entries.length === 0) {
+              return {
+                ok: false,
+                error: 'body.entries must hold { va: number, reason: string } objects',
+              };
+            }
+            return { outcomes: yield* d.unreject(entries) };
+          }
           if (seg[2] === 'entry') {
             const entries = Array.isArray(body.entries)
               ? body.entries.flatMap((e) => {

@@ -45,6 +45,92 @@ import type {
 
 const PAD = new Set([0x90, 0xcc]);
 const TERMINATORS = new Set(['ret', 'retf', 'jmp']);
+
+/**
+ * How many bytes of inter-function padding start at this offset, if any.
+ *
+ * `PAD` is a set of single BYTES and could not express MSVC 6's two-byte
+ * filler: it pads with `8b ff` -- `mov edi,edi` -- as well as with `nop` and
+ * `int3`. Adding 0x8b to the set would have been wrong in the other
+ * direction, because 0x8b is the opcode of every ordinary `mov` and any
+ * function whose first instruction was one would have read as padding.
+ *
+ * That gap had already cost four wrong extents. A worker recorded 0x565C70 at
+ * 344 bytes where it is 130: a `ret` at 0x565CF1 is followed by `8b ff` and
+ * then a switch table, and with the filler unrecognised the table's bytes were
+ * decoded as instructions and yielded a branch belonging to the NEXT function.
+ * Four real functions were rejected as interior to those four extents as a
+ * result.
+ */
+const paddingRun = (bytes: Uint8Array, off: number): number => {
+  let n = 0;
+  while (off + n < bytes.length) {
+    const b = bytes[off + n]!;
+    if (PAD.has(b)) { n += 1; continue; }
+    if (b === 0x8b && bytes[off + n + 1] === 0xff) { n += 2; continue; }
+    break;
+  }
+  return n;
+};
+
+/** Dwords needed to call what follows a terminator a jump table. */
+const TABLE_MIN_ENTRIES = 4;
+
+/**
+ * Whether a switch's jump table starts at this offset.
+ *
+ * A function whose `switch` compiles to a dispatch table has that table laid
+ * out AFTER its final terminator, inside the span the next entry bounds. The
+ * terminator check therefore never fired -- the byte after it is the table's
+ * first byte, which is neither `nop` nor `int3` -- so the function could not
+ * be closed at all. That refused 103 stretches holding 78,882 bytes,
+ * including the three largest functions in the image.
+ *
+ * The convention is settled by the proven set rather than chosen here:
+ * 0x4DB870 is proven byte-exact at 227 bytes with its eight-entry table at
+ * 0x4DB954 EXCLUDED from the size. So the table ends the function and is not
+ * part of it.
+ *
+ * Four entries, not two, and every one of them an address inside `.text`. A
+ * run of four consecutive dwords that all point into the executable span is
+ * not something ordinary code produces, and requiring fewer would risk
+ * truncating a real function -- which is the worse error, since a short
+ * extent is an entry an agent cannot reconstruct at all.
+ */
+const jumpTableAt = (subject: SubjectImage, va: number, end: number): boolean => {
+  const dwordAt = (at: number): number | undefined => {
+    if (at < 0 || at + 3 >= subject.bytes.length) return undefined;
+    return (
+      subject.bytes[at]! |
+      (subject.bytes[at + 1]! << 8) |
+      (subject.bytes[at + 2]! << 16) |
+      (subject.bytes[at + 3]! << 24)
+    );
+  };
+  const inText = (v: number | undefined): boolean =>
+    v !== undefined && v >= subject.textLo && v < subject.textHi;
+
+  let entries = 0;
+  let at = va - subject.imageBase;
+  while (inText(dwordAt(at))) { entries += 1; at += 4; }
+  if (entries < TABLE_MIN_ENTRIES) return false;
+
+  // AND THE TABLE MUST BE THE LAST THING IN THE SPAN.
+  //
+  // Four in-text dwords alone is not enough, because MSVC also lays a switch
+  // table in the MIDDLE of a function, with more of that function's code
+  // after it. Closing there truncates a real function, which is the worse
+  // error: a short extent is an inventory entry nothing can reconstruct.
+  //
+  // Measured, which is the only reason this clause is here: against the
+  // proven set, the four-dword test alone cut 0x563770 to 1,836 bytes where
+  // it is proved at 2,009. Requiring the run to reach the bound, or to be
+  // followed by inter-function padding, is what makes it TRAILING rather than
+  // merely present.
+  const after = subject.imageBase + at;
+  if (after >= end) return true;
+  return paddingRun(subject.bytes, at) > 0;
+};
 /**
  * REMOVED: a first-byte whitelist.
  *
@@ -146,7 +232,17 @@ export const body = (
     const next = i.address + i.size;
     const nextByte = subject.bytes[next - subject.imageBase];
     if (!TERMINATORS.has(i.mnemonic)) continue;
-    if (!(next >= end || (nextByte !== undefined && PAD.has(nextByte)))) continue;
+    // What may follow a function's last instruction: the bound, inter-function
+    // padding, or -- after optional padding -- the switch table the function
+    // dispatches through, which MSVC lays out past the code and which the
+    // proven set shows is excluded from the size.
+    const pad = paddingRun(subject.bytes, next - subject.imageBase);
+    const closes =
+      next >= end ||
+      (nextByte !== undefined && PAD.has(nextByte)) ||
+      pad > 0 ||
+      jumpTableAt(subject, next + pad, end);
+    if (!closes) continue;
     const covered = insns
       .filter((x) => x.address < next)
       .reduce((n, x) => n + x.size, 0);
