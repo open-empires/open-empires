@@ -22,6 +22,7 @@ import {
 import { renderListing } from './listing';
 import { matchRatio } from './similarity';
 import {
+  type Closability,
   DecoderUnavailable,
   OutsideImage,
   type BatchPlan,
@@ -35,8 +36,7 @@ import {
   type Instruction,
   type Inventory,
   type Sibling,
-  type SubjectImage,
-} from './interface';
+  type SubjectImage, } from './interface';
 
 /**
  * The decoder is loaded once per process and the decoding itself is plain
@@ -206,6 +206,34 @@ export class DisasmImpl extends implementing(modules.Disasm) implements IDisasm 
   ): EffectGen<ReadonlyArray<number>, DisasmError> {
     return yield* this.decoding((d) =>
       functions.filter((f) => isCompilerGenerated(d, subject, f)).map((f) => f.va),
+    );
+  }
+
+  *closability(
+    subject: SubjectImage,
+    functions: ReadonlyArray<FunctionExtent>,
+  ): EffectGen<ReadonlyArray<Closability>, DisasmError> {
+    return yield* this.decoding((d) =>
+      functions.map((f) => {
+        const insns = decodeSpan(d, subject, f.va, f.size);
+        let branches = 0;
+        let x87 = false;
+        let jumpTable = false;
+        for (const i of insns) {
+          const m = i.mnemonic;
+          // Every x87 mnemonic begins with `f` and no integer mnemonic does,
+          // so the first character is the whole test. `fs:`/`gs:` are segment
+          // PREFIXES and appear in the operand string, never as a mnemonic.
+          if (m.charCodeAt(0) === 0x66 /* 'f' */) x87 = true;
+          if (m === 'jmp' || m.startsWith('loop') || (m.charCodeAt(0) === 0x6a /* 'j' */)) {
+            branches += 1;
+            // A switch dispatch, as distinct from a call through a function
+            // pointer: the scaled index is what makes it a table.
+            if (m === 'jmp' && i.opStr.includes('*4')) jumpTable = true;
+          }
+        }
+        return { va: f.va, instructions: insns.length, branches, x87, jumpTable };
+      }),
     );
   }
 

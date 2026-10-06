@@ -113,6 +113,21 @@ export interface Inventory {
   readonly seedsFromPointerTables: number;
 }
 
+/** What a function's instructions say about whether it can be finished. */
+export interface Closability {
+  readonly va: number;
+  readonly instructions: number;
+  /** Conditional and unconditional branches. Calls are NOT branches here: a
+   *  long flat run of one call is the shape that CLOSES, not the shape that
+   *  resists. */
+  readonly branches: number;
+  /** Any x87 instruction. A veto, not a weight. */
+  readonly x87: boolean;
+  /** An indirect jump through a scaled index -- `jmp dword ptr [reg*4+disp]`
+   *  -- which is a switch dispatch. A veto. */
+  readonly jumpTable: boolean;
+}
+
 /** Shape keys a function is clustered and matched on. */
 export interface Fingerprint {
   /** Mnemonics and operands with every hex constant replaced by K. An exact
@@ -378,6 +393,25 @@ export interface IDisasm {
     subject: SubjectImage,
     functions: ReadonlyArray<FunctionExtent>,
   ): EffectGen<ReadonlyArray<number>, DisasmError>;
+
+  /**
+   * The three shape facts that predict whether a function can be finished,
+   * measured from its own instructions.
+   *
+   * Not a guess at difficulty: a measured proxy, and the only one this
+   * project has evidence for. Five closes in a week came in at 0.6%-2.3%
+   * branch density, and every candidate declined was 6-16%. x87 and jump
+   * tables are vetoes rather than weights -- floating point brings the whole
+   * x87 register-stack scheduling problem, and a jump table brings a switch
+   * whose arms the compiler lays out past the code.
+   *
+   * Batched because the decoder is the expensive part and this is thousands
+   * of functions.
+   */
+  closability(
+    subject: SubjectImage,
+    functions: ReadonlyArray<FunctionExtent>,
+  ): EffectGen<ReadonlyArray<Closability>, DisasmError>;
 
   /**
    * Already-solved functions worth reading before starting on this one,

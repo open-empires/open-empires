@@ -1067,6 +1067,33 @@ const supervise = () => {
     return setInterval(() => void tick(), seconds * 1000);
   };
 
+  // WHAT THE QUEUE SHOULD HAND OUT NEXT, measured rather than guessed.
+  //
+  // The queue orders by size band and then by whether a function can actually
+  // be finished -- branch density, with x87 and jump tables pushed to the
+  // back. Those facts come from decoding the function, which is far too
+  // expensive to do inside a claim: a claim already came close to tripping
+  // the supervisor's watchdog once.
+  //
+  // So it is measured here, incrementally, and a function whose recorded
+  // extent has since been corrected is re-measured because the old number was
+  // about different bytes. 500 at a time keeps any single pass short.
+  every('closability', 600, async () => {
+    const r = await Effect.runPromise(
+      provided(
+        Effect.gen(function* () {
+          return yield* (yield* modules.Work).measureClosability(500);
+        }),
+      ),
+    );
+    if (r.measured > 0) {
+      console.log(
+        `[closability] measured ${r.measured} function(s), ${r.vetoed} with x87 or a ` +
+          `jump table; ${r.remaining} still unmeasured`,
+      );
+    }
+  }, 120);
+
   // Expiring a lease is how work from a dead agent returns to the queue.
   // Nothing notices an agent died; the lease simply runs out.
   // Discovery is a consequence of progress, not a chore. Every proof makes

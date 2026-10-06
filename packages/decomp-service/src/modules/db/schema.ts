@@ -1773,4 +1773,50 @@ ALTER TABLE composition_runs ADD COLUMN carried    INTEGER NOT NULL DEFAULT 0;
               WHERE name IN ('recompiled','carried')`,
     verifyExpects: 'nonzero',
   },
+  {
+    id: '024-function-closability',
+    sql: `
+-- WHICH UNSOLVED FUNCTION TO HAND OUT, measured instead of guessed.
+--
+-- The queue ordered by size under a ratcheting ceiling, then by size band.
+-- Both are about WHERE THE BYTES ARE and neither is about whether a function
+-- can be finished. A worker measured the second question across every
+-- unsolved function: x87 instructions appear in 1,054 of them holding 38.6%
+-- of the remaining bytes, jump tables in 376 holding 18.9%, and vetoing both
+-- and taking branch density under 5% leaves 684 functions and 202,378 bytes
+-- -- 11.3% of what is left, and the set every recent close came from.
+--
+-- The evidence for branch density is five closes in a week at 0.6% to 2.3%,
+-- against 6-16% for every candidate a worker read and declined. It stands in
+-- for how much of a function is a straight list of source statements, and a
+-- list can be machine-extracted from the disassembly.
+--
+-- x87 and jump tables are VETOES rather than weights. Floating point brings
+-- the whole x87 register-stack scheduling problem; a jump table brings a
+-- switch whose arms the compiler lays out past the code, which is its own
+-- open class.
+--
+-- Stored rather than computed per claim because decoding thousands of
+-- functions is the expensive part, and a claim already came close to tripping
+-- the supervisor's watchdog once.
+CREATE TABLE IF NOT EXISTS function_closability (
+  subject_sha  TEXT    NOT NULL,
+  va           INTEGER NOT NULL,
+  instructions INTEGER NOT NULL,
+  branches     INTEGER NOT NULL,
+  x87          INTEGER NOT NULL,   -- 0 | 1
+  jump_table   INTEGER NOT NULL,   -- 0 | 1
+  -- The size it was measured against. A corrected extent invalidates the
+  -- measurement, and an entry was corrected on four functions this week.
+  size         INTEGER NOT NULL,
+  measured_at  REAL    NOT NULL,
+  PRIMARY KEY (subject_sha, va)
+);
+CREATE INDEX IF NOT EXISTS function_closability_rank
+  ON function_closability(subject_sha, x87, jump_table, branches);
+`,
+    verify: `SELECT COUNT(*) AS missing FROM pragma_table_info('function_closability')
+              WHERE name IN ('branches','x87','jump_table','size')`,
+    verifyExpects: 'nonzero',
+  },
 ];

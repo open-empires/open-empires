@@ -457,6 +457,21 @@ export interface IWork {
   ): EffectGen<ProbeReport, SubmitFailure>;
 
   /**
+   * Measure the shape facts that decide what the queue hands out, for every
+   * unsolved function that has no current measurement.
+   *
+   * Incremental on purpose: a corrected extent invalidates the measurement,
+   * so a row whose recorded size no longer matches is re-measured, and
+   * everything else is left alone. Decoding thousands of functions is the
+   * expensive part.
+   */
+  measureClosability(limit: number): EffectGen<{
+    readonly measured: number;
+    readonly vetoed: number;
+    readonly remaining: number;
+  }, WorkFailure | DisasmError>;
+
+  /**
    * Why each named address can or cannot be claimed.
    *
    * `claim` with explicit addresses silently returns fewer rows than it was

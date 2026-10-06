@@ -3,7 +3,7 @@ import { effunct, implementing, type EffectGen } from 'effective-modules';
 import { modules } from '../index';
 import type { DbError } from '../db/interface';
 import { SUBJECT_FLAGS, SUBJECT_FLAGS_O1, type EmittedCode } from '../gate/interface';
-import type { SubjectImage } from '../disasm/interface';
+import type { DisasmError, SubjectImage } from '../disasm/interface';
 import {
   MAX_PROBE_SOURCES, MAX_SWEEP_FLAG_SETS, NoSubject, NotClaimed, NotStored,
   UnknownFunction,
@@ -102,6 +102,8 @@ export class WorkImpl
       `SELECT f.va AS va, f.size AS size
        FROM functions f
        JOIN current_config c ON c.only_row = 1 AND c.subject_sha = f.subject_sha
+       LEFT JOIN function_closability k
+              ON k.subject_sha = f.subject_sha AND k.va = f.va AND k.size = f.size
        -- A zero-extent entry cannot be reconstructed: there are no bytes to
        -- match. Two exist in the inventory and they are a discovery defect
        -- rather than work -- the gap sweep starting at one of them is why
@@ -183,12 +185,35 @@ export class WorkImpl
        -- The ceiling is unchanged -- it still ratchets, and it still keeps a
        -- 13,791-byte function away from the first caller -- this only decides
        -- what is served underneath it.
+       -- THEN by whether the function can be finished, which is measured.
+       --
+       -- Band order is about where the bytes are. It says nothing about
+       -- whether a function can be closed, and that was measured separately
+       -- across every unsolved function: x87 appears in 1,054 of them holding
+       -- 38.6% of the remaining bytes, jump tables in 376 holding 18.9%, and
+       -- vetoing both and taking branch density under 5% leaves 684 functions
+       -- and 202,378 bytes -- which is the set every recent close came from.
+       --
+       -- Five closes in a week were at 0.6% to 2.3% branch density; every
+       -- candidate a worker read and declined was 6-16%. So branch density
+       -- orders, and x87 and a jump table push to the back rather than being
+       -- excluded: a vetoed function is still work, it is just work nobody
+       -- should be handed before the 684.
+       --
+       -- A LEFT JOIN, and unmeasured sorts with the good ones rather than
+       -- behind them. The measurement is filled by a background job, so a
+       -- newly discovered function has no row for a while, and burying it
+       -- until the job catches up would hide exactly the entries discovery
+       -- just worked to find.
        ORDER BY CASE
                   WHEN f.size BETWEEN 512 AND 4095 THEN 0
                   WHEN f.size BETWEEN 128 AND 511  THEN 1
                   WHEN f.size >= 4096              THEN 2
                   ELSE 3
                 END,
+                COALESCE(k.x87, 0) + COALESCE(k.jump_table, 0),
+                CASE WHEN k.instructions IS NULL OR k.instructions = 0 THEN 0
+                     ELSE CAST(k.branches AS REAL) / k.instructions END,
                 f.size DESC
        LIMIT ?`,
       [t, count],
@@ -723,6 +748,71 @@ export class WorkImpl
         .map(([emittedSha, indices]) => ({ emittedSha, indices }))
         .sort((a, b) => b.indices.length - a.indices.length),
     };
+  }
+
+  *measureClosability(limit: number): EffectGen<
+    { readonly measured: number; readonly vetoed: number; readonly remaining: number },
+    WorkFailure | DisasmError
+  > {
+    const db = this.dependencies.Db;
+    const img = yield* this.image();
+    const sha = img.sha256;
+    const want = Math.min(2000, Math.max(1, limit));
+
+    // Unsolved, and either never measured or measured against a size that has
+    // since been corrected.
+    const todo = (yield* db.all(
+      `SELECT f.va AS va, f.size AS size
+         FROM functions f
+         JOIN current_config c ON c.only_row = 1 AND c.subject_sha = f.subject_sha
+        WHERE f.size > 0
+          AND NOT EXISTS (SELECT 1 FROM proven p
+                           WHERE p.subject_sha = f.subject_sha AND p.va = f.va)
+          AND NOT EXISTS (SELECT 1 FROM function_closability k
+                           WHERE k.subject_sha = f.subject_sha AND k.va = f.va
+                             AND k.size = f.size)
+        ORDER BY f.size DESC
+        LIMIT ?`,
+      [want],
+    )) as ReadonlyArray<{ va: number; size: number }>;
+
+    if (todo.length === 0) return { measured: 0, vetoed: 0, remaining: 0 };
+
+    const shapes = yield* this.dependencies.Disasm.closability(img, todo);
+    const sizeOf = new Map(todo.map((f) => [f.va, f.size]));
+    let vetoed = 0;
+    const at = now();
+    yield* db.tx(function* () {
+      for (const k of shapes) {
+        if (k.x87 || k.jumpTable) vetoed += 1;
+        yield* db.run(
+          `INSERT INTO function_closability(subject_sha, va, instructions, branches,
+                                            x87, jump_table, size, measured_at)
+           VALUES (?,?,?,?,?,?,?,?)
+           ON CONFLICT(subject_sha, va) DO UPDATE SET
+             instructions = excluded.instructions, branches = excluded.branches,
+             x87 = excluded.x87, jump_table = excluded.jump_table,
+             size = excluded.size, measured_at = excluded.measured_at`,
+          [
+            sha, k.va, k.instructions, k.branches,
+            k.x87 ? 1 : 0, k.jumpTable ? 1 : 0, sizeOf.get(k.va) ?? 0, at,
+          ],
+        );
+      }
+    });
+
+    const left = (yield* db.one(
+      `SELECT COUNT(*) AS n FROM functions f
+         JOIN current_config c ON c.only_row = 1 AND c.subject_sha = f.subject_sha
+        WHERE f.size > 0
+          AND NOT EXISTS (SELECT 1 FROM proven p
+                           WHERE p.subject_sha = f.subject_sha AND p.va = f.va)
+          AND NOT EXISTS (SELECT 1 FROM function_closability k
+                           WHERE k.subject_sha = f.subject_sha AND k.va = f.va
+                             AND k.size = f.size)`,
+    )) as { n: number };
+
+    return { measured: shapes.length, vetoed, remaining: left.n };
   }
 
   *claimable(vas: ReadonlyArray<number>): EffectGen<ReadonlyArray<Claimability>, WorkFailure> {
