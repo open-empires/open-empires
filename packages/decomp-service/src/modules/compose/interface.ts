@@ -99,6 +99,19 @@ export interface CompositionReport {
   readonly textHi: number;
   readonly spanBytes: number;
   readonly considered: number;
+  /**
+   * How `considered` was reached. A run may carry a contribution forward
+   * instead of recompiling it -- only when a previous finished run under the
+   * same toolchain recorded the same attempt as `placed` with no differing
+   * byte, which makes re-emitting it provably a no-op against a canvas
+   * initialised from the subject.
+   *
+   * Reported separately because a run that recompiled twelve functions and
+   * carried 3,350 must not read as having verified 3,362. A cache that claimed
+   * work it had not done is a defect this project has already shipped once.
+   */
+  readonly recompiled: number;
+  readonly carried: number;
   readonly placed: number;
   readonly notBuilt: number;
   readonly tooShort: number;

@@ -258,6 +258,36 @@ const routes = async (req: Request): Promise<Response> => {
                   Option.getOrUndefined(str(body.toolchain)),
                 ),
               );
+            // Why each named address can or cannot be claimed. `claim` with
+            // explicit addresses returns fewer rows without saying which were
+            // refused or why, and "someone else holds it" and "it is already
+            // done" are opposite instructions to a worker.
+            case 'claimable': {
+              const asked = Array.isArray(body.vas)
+                ? body.vas.map(num)
+                : (url.searchParams.get('vas') ?? '')
+                    .split(',')
+                    .filter((x) => x.trim() !== '')
+                    .map((x) => Number(x.trim()));
+              if (asked.length === 0) {
+                return {
+                  ok: false,
+                  error:
+                    'name the addresses: /api/work/claimable?vas=0x5e1110,0x5e1170 ' +
+                    'or POST {"vas":[...]}',
+                };
+              }
+              return {
+                asked: asked.length,
+                addresses: (yield* work.claimable(asked)).map((c) => ({
+                  va: `0x${c.va.toString(16)}`,
+                  reason: c.reason,
+                  size: Option.getOrNull(c.size),
+                  heldBy: Option.getOrNull(c.heldBy),
+                  secondsLeft: Option.getOrNull(c.secondsLeft),
+                })),
+              };
+            }
             // GET or POST; the agent id may come from the query string so
             // this is answerable with a plain `curl` while an agent is mid-run.
             case 'claims': {

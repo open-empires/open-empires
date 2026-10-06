@@ -46,6 +46,8 @@ const RunRow = Schema.Struct({
   text_lo: Schema.Number,
   text_hi: Schema.Number,
   considered: Schema.Number,
+  recompiled: Schema.Number,
+  carried: Schema.Number,
   placed: Schema.Number,
   not_built: Schema.Number,
   too_short: Schema.Number,
@@ -205,22 +207,87 @@ export class ComposeImpl
 
     const corpus = yield* reconstructionsInForce(db);
 
+    // WHAT NEED NOT BE RECOMPILED.
+    //
+    // A run recompiles every reconstruction in force. Alone that is about
+    // seven minutes; sharing the one container with five agents it took
+    // nearly thirty, and on a thirty-minute interval over a proven set that
+    // changes constantly it would hold the compiler permanently and halve
+    // every agent's throughput.
+    //
+    // So a contribution is carried forward when, and only when, a previous
+    // FINISHED run under the SAME toolchain recorded the SAME attempt as
+    // `placed` with diff_bytes = 0. Such a contribution wrote bytes equal to
+    // the subject's at that address, and `composed` is initialised from the
+    // subject, so re-emitting it provably writes the same bytes that are
+    // already there. Carrying it is exact, not an approximation.
+    //
+    // Everything else is recompiled: a different source (a different
+    // attempt_id), a different compiler, an origin that is not `placed`, or
+    // any disagreement whatever. A contribution with diff_bytes > 0 is a
+    // retraction and is the last thing that should be taken on trust.
+    const carriedRows = (yield* db.all(
+      `SELECT cc.va AS va, cc.attempt_id AS attempt_id, cc.size AS size,
+              cc.emitted AS emitted, cc.masked AS masked
+         FROM composition_contributions cc
+         JOIN composition_runs r ON r.id = cc.run_id
+        WHERE r.subject_sha = ? AND r.toolchain_id = ?
+          AND r.finished_at IS NOT NULL
+          AND cc.origin = 'placed' AND cc.diff_bytes = 0
+        GROUP BY cc.va, cc.attempt_id`,
+      [s.sha256, inForce],
+    )) as ReadonlyArray<{
+      va: number; attempt_id: number; size: number; emitted: number | null; masked: number;
+    }>;
+    const carriedBy = new Map(carriedRows.map((r) => [`${r.va}:${r.attempt_id}`, r]));
+
+    const toCarry: Contribution[] = [];
+    const toCompile: Reconstruction[] = [];
+    for (const r of corpus) {
+      const hit = carriedBy.get(`${r.va}:${r.attempt_id}`);
+      // The recorded size must also match: a corrected inventory entry changes
+      // what the function occupies, so a contribution measured against the old
+      // size says nothing about the new one.
+      if (hit !== undefined && hit.size === r.size) {
+        toCarry.push({
+          va: r.va,
+          attemptId: r.attempt_id,
+          origin: 'placed',
+          size: r.size,
+          emitted: Option.fromNullishOr(hit.emitted),
+          masked: hit.masked,
+          diffBytes: 0,
+          firstDiff: Option.none(),
+          detail: Option.some('carried forward from an earlier run under this toolchain'),
+        });
+      } else {
+        toCompile.push(r);
+      }
+    }
+
     const placements = yield* Effect.forEach(
-      corpus,
+      toCompile,
       effunct((r: Reconstruction) =>
         this.placementFor(r, s, original),
       ),
       { concurrency: CONCURRENCY },
     );
 
-    const contributions: Contribution[] = [];
-    let placed = 0;
+    // Seeded with the carried set, so the totals describe the whole corpus and
+    // not only the part that was recompiled. `recompiled` and `carried` are
+    // recorded separately: a run that recompiled twelve and carried 3,350 must
+    // not read as having verified 3,362.
+    const contributions: Contribution[] = [...toCarry];
+    let placed = toCarry.length;
     let notBuilt = 0;
     let tooShort = 0;
     let outsideSpan = 0;
     let disagreeing = 0;
-    let placedBytes = 0;
-    let maskedBytes = 0;
+    let placedBytes = toCarry.reduce(
+      (n, c) => n + Option.getOrElse(c.emitted, () => c.size),
+      0,
+    );
+    let maskedBytes = toCarry.reduce((n, c) => n + c.masked, 0);
 
     for (const p of placements) {
       const { va, size } = p.reconstruction;
@@ -268,12 +335,13 @@ export class ComposeImpl
             SET finished_at = ?, considered = ?, placed = ?, not_built = ?,
                 too_short = ?, outside_span = ?, disagreeing = ?,
                 placed_bytes = ?, masked_bytes = ?, overlaps = ?,
-                diff_bytes = ?, unattributed_diff_bytes = ?
+                diff_bytes = ?, unattributed_diff_bytes = ?,
+                recompiled = ?, carried = ?
           WHERE id = ?`,
         [
           now(), corpus.length, placed, notBuilt, tooShort, outsideSpan,
           disagreeing, placedBytes, maskedBytes, overlaps.length, diffBytes,
-          diffBytes - attributed, runId,
+          diffBytes - attributed, toCompile.length, toCarry.length, runId,
         ],
       );
       const id = runId;
@@ -301,6 +369,8 @@ export class ComposeImpl
       textHi: s.textHi,
       spanBytes,
       considered: corpus.length,
+      recompiled: toCompile.length,
+      carried: toCarry.length,
       placed,
       notBuilt,
       tooShort,
@@ -391,6 +461,8 @@ export class ComposeImpl
     );
     return Option.some({
       runId: run.id,
+      recompiled: run.recompiled,
+      carried: run.carried,
       subjectSha: run.subject_sha,
       toolchainInForce: run.toolchain_id,
       // A stored run names the toolchain it was made under; there is no second

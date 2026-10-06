@@ -1743,4 +1743,34 @@ SELECT c.subject_sha, s.slot,
        )) AS shortfall`,
     verifyExpects: 'zero',
   },
+  {
+    id: '023-composition-run-says-what-it-recompiled',
+    sql: `
+-- A composition run recompiles every reconstruction in force and takes about
+-- seven minutes alone; sharing the one container with five agents it took
+-- nearly thirty. On a thirty-minute interval over a proven set that changes
+-- constantly, it would hold the compiler permanently and halve every agent's
+-- throughput. So a run may now CARRY FORWARD a contribution instead of
+-- recompiling it.
+--
+-- The carry-forward is exact, not an approximation, and it is sound for
+-- exactly one case: a contribution recorded as placed with diff_bytes = 0,
+-- for the same attempt_id, under a run with the same toolchain_id. Such a
+-- contribution wrote bytes equal to the subject's, and the canvas is
+-- initialised from the subject, so re-emitting it provably changes nothing.
+-- Anything else -- a different source, a different compiler, or any
+-- disagreement at all -- is recompiled.
+--
+-- These two columns exist so the run cannot claim work it did not do. A run
+-- that recompiled twelve functions and carried 3,350 must not read as having
+-- verified 3,362: that is how a cache keyed on a timestamp came to report
+-- "already proved" about a harness no proof had ever seen. considered stays
+-- the total; these say how it was reached.
+ALTER TABLE composition_runs ADD COLUMN recompiled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE composition_runs ADD COLUMN carried    INTEGER NOT NULL DEFAULT 0;
+`,
+    verify: `SELECT COUNT(*) AS missing FROM pragma_table_info('composition_runs')
+              WHERE name IN ('recompiled','carried')`,
+    verifyExpects: 'nonzero',
+  },
 ];

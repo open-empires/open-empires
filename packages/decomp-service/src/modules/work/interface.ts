@@ -181,6 +181,30 @@ export interface SweepComparison {
   readonly relocatedOffsets: ReadonlyArray<number>;
 }
 
+/**
+ * Whether one named address can be claimed, and if not, which of the mutually
+ * exclusive reasons applies. The order they are decided in is the order they
+ * are listed here, so an address that is both absent and unproven reports the
+ * absence -- the more fundamental fact.
+ */
+export type ClaimabilityReason =
+  | 'claimable'
+  /** No inventory entry for this address under the current subject. */
+  | 'not-in-inventory'
+  /** An entry with no bytes: a discovery defect, not work. */
+  | 'zero-extent'
+  | 'already-proven'
+  | 'held-by-another';
+
+export interface Claimability {
+  readonly va: number;
+  readonly reason: ClaimabilityReason;
+  readonly size: Option.Option<number>;
+  /** Who holds it, when the reason is `held-by-another`. */
+  readonly heldBy: Option.Option<string>;
+  readonly secondsLeft: Option.Option<number>;
+}
+
 /** One live lease, as its holder needs to see it. */
 export interface HeldClaim {
   readonly va: number;
@@ -223,6 +247,22 @@ export interface IWork {
     leaseSeconds: number,
     vas?: ReadonlyArray<number>,
   ): EffectGen<ReadonlyArray<WorkItem>, WorkFailure>;
+
+  /**
+   * Why each named address can or cannot be claimed.
+   *
+   * `claim` with explicit addresses silently returns fewer rows than it was
+   * asked for: the query refuses an address that is already proven or under
+   * someone else's lease, and the caller gets an array with nothing missing
+   * from it that it can name. A worker asked for two addresses, received
+   * `[]`, and could not tell "someone else is on it" from "it is already
+   * done" -- which are opposite instructions.
+   *
+   * Kept as its own answer rather than folded into `claim`'s array, because
+   * that array is what every live agent iterates and changing its shape
+   * mid-run would break them.
+   */
+  claimable(vas: ReadonlyArray<number>): EffectGen<ReadonlyArray<Claimability>, WorkFailure>;
 
   /**
    * What this agent holds right now.

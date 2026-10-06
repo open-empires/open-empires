@@ -137,6 +137,11 @@ export const CompositionRunWire = Schema.Struct({
   textHi: Schema.Number,
   spanBytes: Schema.Number,
   considered: Schema.Number,
+  /** How `considered` was reached: recompiled now, or carried forward from an
+   *  earlier run under this same toolchain. On the wire so a reader can tell
+   *  what the run actually did rather than what it covered. */
+  recompiled: Schema.Number,
+  carried: Schema.Number,
   placed: Schema.Number,
   notBuilt: Schema.Number,
   tooShort: Schema.Number,

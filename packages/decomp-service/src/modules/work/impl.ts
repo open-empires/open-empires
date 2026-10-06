@@ -7,7 +7,7 @@ import type { SubjectImage } from '../disasm/interface';
 import {
   MAX_SWEEP_FLAG_SETS, NoSubject, NotClaimed, UnknownFunction,
   ParkWithoutReason,
-  type HeldClaim,
+  type Claimability, type HeldClaim,
   type IWork, type SubmitFailure, type SweepComparison, type SweepOutcome,
   type SweepReport,
   type Verdict, type WorkFailure, type WorkItem,
@@ -514,6 +514,70 @@ export class WorkImpl
       detail:
         `you have never claimed 0x${va.toString(16)}; ` +
         `POST /api/work/claim with {"vas":[${va}]} to take it`,
+    });
+  }
+
+  *claimable(vas: ReadonlyArray<number>): EffectGen<ReadonlyArray<Claimability>, WorkFailure> {
+    const db = this.dependencies.Db;
+    if (vas.length === 0) return [];
+    const at = now();
+    // `IN (...)`, not a dynamic `VALUES` list. The SQL audit normalises an
+    // interpolated placeholder list to a single `?` so it can compile every
+    // statement against the live schema; `IN (?)` is valid SQL and
+    // `VALUES ?` is not, so the audit could not check the query at all.
+    //
+    // The consequence is that an address with no inventory row returns no row
+    // here, so absence is worked out below against the asked list -- which is
+    // where the asked list actually is.
+    const rows = (yield* db.all(
+      `SELECT f.va AS va, f.size AS size,
+              EXISTS(SELECT 1 FROM proven p
+                      WHERE p.subject_sha = f.subject_sha AND p.va = f.va) AS proven,
+              (SELECT cl.agent_id FROM claims cl
+                WHERE cl.subject_sha = f.subject_sha AND cl.va = f.va
+                  AND cl.released_at IS NULL AND cl.expires_at > ?
+                ORDER BY cl.expires_at DESC LIMIT 1) AS held_by,
+              (SELECT cl.expires_at FROM claims cl
+                WHERE cl.subject_sha = f.subject_sha AND cl.va = f.va
+                  AND cl.released_at IS NULL AND cl.expires_at > ?
+                ORDER BY cl.expires_at DESC LIMIT 1) AS expires_at
+         FROM functions f
+         JOIN current_config c ON c.only_row = 1 AND c.subject_sha = f.subject_sha
+        WHERE f.va IN (${vas.map(() => '?').join(',')})`,
+      [at, at, ...vas],
+    )) as ReadonlyArray<{
+      va: number; size: number; proven: number;
+      held_by: string | null; expires_at: number | null;
+    }>;
+    const found = new Map(rows.map((r) => [r.va, r]));
+    return vas.map((va) => {
+      const r = found.get(va);
+      if (r === undefined) {
+        return {
+          va,
+          reason: 'not-in-inventory' as const,
+          size: Option.none(),
+          heldBy: Option.none(),
+          secondsLeft: Option.none(),
+        };
+      }
+      const reason = r.size === 0
+        ? 'zero-extent' as const
+        : r.proven === 1
+          ? 'already-proven' as const
+          : r.held_by !== null
+            ? 'held-by-another' as const
+            : 'claimable' as const;
+      return {
+        va,
+        reason,
+        size: Option.some(r.size),
+        heldBy: reason === 'held-by-another' ? Option.fromNullishOr(r.held_by) : Option.none(),
+        secondsLeft:
+          reason === 'held-by-another' && r.expires_at !== null
+            ? Option.some(Math.round(r.expires_at - at))
+            : Option.none(),
+      };
     });
   }
 
