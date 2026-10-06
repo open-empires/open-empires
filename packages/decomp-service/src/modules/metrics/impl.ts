@@ -190,27 +190,43 @@ export class MetricsImpl
     // had been collected yet, which reads as a flat start that never
     // happened. `sinceSeconds` is only the fallback for an empty record.
     const from = earliest?.at == null ? now - sinceSeconds : earliest.at;
-    // Each bucket is a real boundary in the data, not a moment a collector
-    // happened to wake up: `proven` carries the decision time of every
-    // verdict, so the cumulative count at time t is just a query.
-    const rows = yield* this.dependencies.Db.all(
-      `WITH RECURSIVE b(i) AS (
-         SELECT 0 UNION ALL SELECT i + 1 FROM b WHERE i + 1 < ?
-       ),
-       t AS (SELECT ? + (? - ?) * (i + 1.0) / ? AS at FROM b)
-       SELECT t.at AS at,
-              (SELECT COUNT(DISTINCT va) FROM proven p
-                 WHERE p.decided_at <= t.at)                      AS proven,
-              (SELECT COALESCE(SUM(size), 0) FROM
-                 (SELECT DISTINCT va, size FROM proven p2
-                    WHERE p2.decided_at <= t.at))                 AS bytes
-       FROM t ORDER BY t.at`,
-      [buckets, from, now, from, buckets],
-    );
-    return rows.map((raw) => {
-      const o = raw as Record<string, unknown>;
-      return { at: num(o.at), proven: num(o.proven), bytes: num(o.bytes) };
-    });
+    // ONE PASS over the proven set, bucketed here.
+    //
+    // This ran two aggregates per bucket, 80 buckets, each one scanning the
+    // `proven` VIEW -- itself a six-way join -- and one of the two
+    // materialising a nested DISTINCT. It cost 2,338ms of a 2,898ms
+    // `/api/status`, which the dashboard polls continuously, and it is the
+    // third correlated-subquery cost this service has had.
+    //
+    // It also survived a check that should have caught it. Timing the query
+    // standalone gave 15ms, because the query I timed was the COUNT half and
+    // not the SUM-over-nested-DISTINCT half -- so the cheap half cleared the
+    // expensive one. A probe that is not the real statement answers a
+    // different question, which is the same error as a guard that shares its
+    // subject's blind spot.
+    //
+    // The series is cumulative, so one ordered pass computes every bucket:
+    // 3,466 rows read once instead of 160 scans of a join.
+    const events = (yield* this.dependencies.Db.all(
+      `SELECT va, size, MIN(decided_at) AS at FROM proven GROUP BY va ORDER BY at`,
+    )) as ReadonlyArray<{ va: number; size: number; at: number }>;
+
+    const points: SeriesPoint[] = [];
+    let i = 0;
+    let count = 0;
+    let bytes = 0;
+    for (let b = 0; b < buckets; b += 1) {
+      const at = from + ((now - from) * (b + 1)) / buckets;
+      // `events` is ordered by time and the cursor only moves forward, so
+      // every row is examined exactly once across all 80 buckets.
+      while (i < events.length && events[i]!.at <= at) {
+        count += 1;
+        bytes += events[i]!.size;
+        i += 1;
+      }
+      points.push({ at, proven: count, bytes });
+    }
+    return points;
   }
 
   *queue(): EffectGen<{ depth: number; claimed: number }, DbError> {

@@ -429,34 +429,68 @@ const routes = async (req: Request): Promise<Response> => {
         Effect.gen(function* () {
           const m = yield* modules.Metrics;
           const reg = yield* modules.Registry;
-          return {
+          // TIMED PER FIGURE, like a claim is timed per stage.
+          //
+          // This endpoint takes 2.2 to 4.9 seconds and the dashboard polls
+          // it. Guessing which figure costs that has already been wrong once:
+          // the progress series looked like the obvious culprit -- 80 buckets,
+          // each a pair of aggregates over a six-way-join view -- and runs in
+          // 15 milliseconds. A component nobody can time is a component
+          // everybody guesses about, and the last time that happened here the
+          // disassembler took the blame for 462ms of a 51.7-second claim.
+          const started = Date.now();
+          const marks: string[] = [];
+          const mark = (what: string) => {
+            marks.push(`${what}=${Date.now() - started}ms`);
+          };
+          const phase2 = yield* m.phase2();            mark('phase2');
+          const gate = yield* m.lastGateRun();          mark('gate');
+          const composition = yield* m.composition();   mark('composition');
+          const blocked = yield* m.blockedClasses();    mark('blocked');
+          const imports = yield* m.importSurface();     mark('imports');
+          const symbols = yield* m.symbolMap();         mark('symbols');
+          const port = yield* m.portSurface();          mark('port');
+          const progress = yield* m.progress(24 * 3600, 80); mark('progress');
+          const queue = yield* m.queue();               mark('queue');
+          const inventory = yield* m.inventoryHealth(); mark('inventory');
+          const blockers = yield* m.blockers();         mark('blockers');
+          const note = yield* m.workingOn();            mark('workingOn');
+          // `summary()`, never `recorded()`: the full report assembles every
+          // entry, deferral and pointer candidate -- tens of thousands of
+          // rows -- and this is polled continuously.
+          const globals = yield* (yield* modules.Globals).summary(); mark('globals');
+          const agents = encodeAgents(yield* reg.list());
+
+          const body = {
             now: Date.now() / 1000,
-            phase2: yield* m.phase2(),
-            gate: yield* m.lastGateRun(),
-            composition: yield* m.composition(),
-            blocked: yield* m.blockedClasses(),
-            imports: yield* m.importSurface(),
-            symbols: yield* m.symbolMap(),
-            port: yield* m.portSurface(),
-            progress: yield* m.progress(24 * 3600, 80),
-            queue: yield* m.queue(),
-            inventory: yield* m.inventoryHealth(),
-            blockers: yield* m.blockers(),
-            workingOn: Option.match(yield* m.workingOn(), {
+            phase2,
+            gate,
+            composition,
+            blocked,
+            imports,
+            symbols,
+            port,
+            progress,
+            queue,
+            inventory,
+            blockers,
+            workingOn: Option.match(note, {
               onNone: () => null,
               onSome: (w) => ({ note: w.note, updatedAt: w.updatedAt }),
             }),
-            // The globals surface, from the module that owns it rather than
-            // a second copy of its queries here. The wasm build needs every
+            // The globals surface, from the module that owns it rather than a
+            // second copy of its queries here. The wasm build needs every
             // global the game reads, so "how many do we know the extent and
-            // meaning of" belongs beside the function count, not behind a
-            // separate call nobody looks at.
-            // `summary()`, never `recorded()`: the full report assembles
-            // every entry, deferral and pointer candidate -- tens of
-            // thousands of rows -- and this is polled every five seconds.
-            globals: yield* (yield* modules.Globals).summary(),
-            agents: encodeAgents(yield* reg.list()),
+            // meaning of" belongs beside the function count.
+            globals,
+            agents,
           };
+          mark('agents');
+          const total = Date.now() - started;
+          // Only when it is slow enough to matter. A line per poll would be
+          // the loudest thing in the log and say nothing on a normal day.
+          if (total > 1000) console.log(`[status] answered in ${total}ms (${marks.join(' ')})`);
+          return body;
         }),
       ) as Effect.Effect<unknown, { readonly _tag: string }, never>,
     );
