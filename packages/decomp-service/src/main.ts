@@ -25,6 +25,7 @@ import { throttleStats } from './modules/gate/throttle';
 import { canaryState, superviseCanary } from './canary';
 import { modules } from './modules';
 import { guestRamPaths } from './modules/subject/paths';
+import { PORTABLE_TREE_PATH } from './modules/portable/paths';
 import { ComposeImpl } from './modules/compose/impl';
 import { DbImpl, handle as dbHandle } from './modules/db/impl';
 import { DisasmImpl } from './modules/disasm/impl';
@@ -1161,7 +1162,13 @@ const supervise = () => {
       provided(
         Effect.gen(function* () {
           const p = yield* modules.Portable;
-          return yield* p.generate(Option.none());
+          // INTO THE TREE, not nowhere. This passed `None`, which records
+          // every file's outcome in `port_files` and writes no file at all --
+          // so the 2,490 files on disk were the old Python script's, four
+          // days stale, while the service's conversion existed only as rows.
+          // The browser build compiles the tree, so the tree has to be what
+          // the service produced.
+          return yield* p.generate(Option.some(PORTABLE_TREE_PATH));
         }),
       ),
     );

@@ -23,3 +23,21 @@ runs anywhere and cannot quietly stop running.
 The functions declared here are exactly those the proved corpus calls. If a new
 reconstruction calls something absent, the check fails and names it, which is
 how this list stays honest rather than aspirational.
+
+## The one file that still does not compile, and why no rewrite is offered
+
+`sub_0041E740.cpp` fails with `assigning to 'void *' from incompatible type
+'int (int)'`. The source declares `extern int __stdcall CB(int);` and a struct
+field `void *cb;`, then assigns one to the other. MSVC performs the
+function-to-`void *` conversion implicitly; in C++ it is not implicit.
+
+No mechanical rewrite is offered for it, deliberately. Inserting a `(void *)`
+cast wherever a bare identifier is assigned would be wrong in exactly the
+cases that matter: an assignment whose target is a real function pointer
+compiles today and would stop compiling, because `void *` does not convert
+back. Getting it right needs to know the declared type of the assignment's
+LEFT side, which means type-aware parsing rather than a pattern.
+
+So it wants either a hand-written portable rendering of that one function, or
+a converter that carries type information. One file of 3,268 is not the
+argument for the second.

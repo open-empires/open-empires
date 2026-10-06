@@ -152,7 +152,42 @@ export class WorkImpl
              JOIN current_config c2
                ON c2.only_row = 1 AND c2.subject_sha = p2.subject_sha
          )
-       ORDER BY f.size DESC
+       -- WITHIN the ceiling, by BAND, not by raw size.
+       --
+       -- size DESC under a ratcheting ceiling has a perverse effect that
+       -- took a worker measuring the remaining bytes to see. The bands of
+       -- what is still open:
+       --
+       --     <128        1,065 fns     71,211 B    4.3%
+       --     128-511     1,969 fns    516,559 B   30.9%
+       --     512-2047      776 fns    718,663 B   43.0%
+       --     2048-4095      86 fns    229,721 B   13.8%
+       --     4096+          22 fns    133,496 B    8.0%
+       --
+       -- Ordering by size descending serves those 22 functions first, and
+       -- they hold 8% of the work. The 512-4095 bands hold 56.8% in 862
+       -- functions and were being reached only after the 4096+ band was
+       -- exhausted -- and it does not get exhausted, because every attempt on
+       -- it so far has parked: 0x502290, 0x528350, 0x5754C0, 0x56D3C0 and
+       -- 0x5F0690 are all 6KB or more and all unproven, while today's three
+       -- closes were 1,836, 1,964 and 3,495 bytes.
+       --
+       -- Worse, the ratchet made it self-reinforcing: proving one large
+       -- function raises the ceiling, which floods the queue with more of the
+       -- band nothing closes.
+       --
+       -- So the bytes and the evidence agree, and the order follows them:
+       -- 512-4095 first, then 128-511, then the big band, then the stubs.
+       -- The ceiling is unchanged -- it still ratchets, and it still keeps a
+       -- 13,791-byte function away from the first caller -- this only decides
+       -- what is served underneath it.
+       ORDER BY CASE
+                  WHEN f.size BETWEEN 512 AND 4095 THEN 0
+                  WHEN f.size BETWEEN 128 AND 511  THEN 1
+                  WHEN f.size >= 4096              THEN 2
+                  ELSE 3
+                END,
+                f.size DESC
        LIMIT ?`,
       [t, count],
     );

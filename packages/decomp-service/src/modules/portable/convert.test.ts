@@ -218,3 +218,40 @@ test('every rendered file carries the MSVC-spelling header', () => {
   if (out.state !== 'converted') return;
   expect(out.text).toContain('#include "msvc.h"');
 });
+
+test('placement new, where `unsigned` stands alone, is rewritten too', () => {
+  // Three of the six failures were `operator new(unsigned int)` and three were
+  // `operator new(unsigned, void *p)`. Matching only the first spelling fixed
+  // half of them and left the rest failing identically -- caught by the count,
+  // not by a spot check.
+  const out = convert('inline void *operator new(unsigned, void *p) { return p; }\n');
+  expect(out.state).toBe('converted');
+  if (out.state !== 'converted') return;
+  expect(out.text).toContain('operator new(decltype(sizeof(0)), void *p)');
+});
+
+test('operator delete is rewritten on the same rule', () => {
+  const out = convert('void operator delete(unsigned int p);\nint f() { return 0; }\n');
+  expect(out.state).toBe('converted');
+  if (out.state !== 'converted') return;
+  expect(out.text).toContain('operator delete(decltype(sizeof(0)) p)');
+});
+
+test('an HRESULT case label is cast rather than the switch widened', () => {
+  // 0x887601C2 does not fit in int. MSVC narrows it silently; C++11 refuses.
+  // The cast is written in because widening the switch would change the
+  // program, and this tree exists to be the same program.
+  const out = convert('int f(int h) { switch (h) { case 0x887601c2: return 1; } return 0; }\n');
+  expect(out.state).toBe('converted');
+  if (out.state !== 'converted') return;
+  expect(out.text).toContain('case (int)0x887601c2:');
+});
+
+test('an ordinary small case label is left alone', () => {
+  const out = convert('int f(int h) { switch (h) { case 0x10: return 1; case 7: return 2; } return 0; }\n');
+  expect(out.state).toBe('converted');
+  if (out.state !== 'converted') return;
+  expect(out.text).toContain('case 0x10:');
+  expect(out.text).toContain('case 7:');
+  expect(out.text).not.toContain('(int)0x10');
+});

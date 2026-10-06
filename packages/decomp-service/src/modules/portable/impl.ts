@@ -42,9 +42,45 @@ export class PortableImpl
     const subjectSha = current.value.sha256;
     const corpus = yield* reconstructionsInForce(db);
 
+    /**
+     * Functions the CRT identification names, which the browser build must
+     * NOT get from here.
+     *
+     * These are the C runtime's own objects, matched to the shipped library
+     * down to the member they came from. Reconstructing them was worth doing
+     * -- it is how the x86 span closes -- but a wasm toolchain brings its own
+     * `sprintf` and `wcsstr`, and the MSVC array-construction and unwind
+     * helpers from `ehvecctr.obj` and `ehvecdtr.obj` have no wasm form at all:
+     * three of them are written with `__try`, which is why they were the
+     * largest remaining group of files the browser build could not compile.
+     *
+     * Converting them produced a file that cannot build, to replace a
+     * function the target already supplies. They are recorded as refused, with
+     * the symbol, so the count stays visible rather than the rows quietly
+     * disappearing.
+     */
+    const crt = new Map(
+      (
+        (yield* db.all(
+          `SELECT va, symbol FROM crt_identifications WHERE subject_sha = ?`,
+          [subjectSha],
+        )) as ReadonlyArray<{ va: number; symbol: string }>
+      ).map((r) => [r.va, r.symbol]),
+    );
+
     const files: Array<{ readonly va: number; readonly state: PortState; readonly reason: string | null; readonly text: string | null }> = [];
     const stranded: Array<{ readonly va: number; readonly literal: number }> = [];
     for (const r of corpus) {
+      const identified = crt.get(r.va);
+      if (identified !== undefined) {
+        files.push({
+          va: r.va,
+          state: 'refused',
+          reason: `identified as the CRT's own ${identified}; the wasm toolchain supplies it`,
+          text: null,
+        });
+        continue;
+      }
       const out = convert(r.source);
       if (out.state === 'refused') {
         files.push({ va: r.va, state: 'refused', reason: out.reason, text: null });

@@ -19,10 +19,17 @@
 #ifndef OE_MSVC_H
 #define OE_MSVC_H
 
-/* MSVC's 64-bit integer spelling. One source names it; nothing defines it off
- * Microsoft's compiler. */
-typedef long long __int64;
-typedef unsigned long long __uint64;
+/* MSVC's 64-bit integer spelling.
+ *
+ * A MACRO, not a typedef, and the difference is the whole point. `__int64` is
+ * a built-in TYPE SPECIFIER to Microsoft's compiler, so a source may write
+ * `unsigned __int64 c;` -- and one does. `unsigned` cannot be applied to a
+ * typedef name, so declaring it that way turned one file's error from
+ * "unknown type name" into "expected ';' at end of declaration list": a fix
+ * that moved the failure rather than removing it. Substituting the token
+ * makes `unsigned __int64` expand to `unsigned long long`, which is what the
+ * source means. */
+#define __int64 long long
 
 /* `__forceinline` is MSVC's spelling of an inlining demand. Rendered as a
  * request rather than a demand: the browser build's code generator is not the

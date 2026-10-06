@@ -83,8 +83,16 @@ export const GLOBALS_END = GLOBALS_BASE + 1554534;
  * `decltype(sizeof(0))` IS `size_t` by definition, on every target, and needs
  * no header -- which matters because these files include only what the
  * generator gives them.
+ *
+ * `int` is OPTIONAL in the match. Three of the six were written
+ * `operator new(unsigned int)` and the other three `operator new(unsigned,
+ * void *p)` -- the placement form, where `unsigned` stands alone. Requiring
+ * the `int` fixed half of them and left the other half failing in exactly
+ * the same way, which is the kind of near-miss a count catches and a spot
+ * check does not.
  */
-const OPERATOR_NEW_SIZE = /\b(operator\s+(?:new|delete)(?:\s*\[\s*\])?\s*\(\s*)unsigned\s+int\b/g;
+const OPERATOR_NEW_SIZE =
+  /\b(operator\s+(?:new|delete)(?:\s*\[\s*\])?\s*\(\s*)unsigned(?:\s+int)?\b/g;
 
 /**
  * A bare out-of-line declaration of a member, which MSVC accepts and a
@@ -141,6 +149,24 @@ const dropOutOfLineDeclarations = (text: string): string => {
   }
   return kept.join('\n');
 };
+
+/**
+ * A `case` label that does not fit in an `int`.
+ *
+ * One function maps HRESULTs, and an HRESULT with its failure bit set --
+ * `0x887601C2`, `0x80070057` -- is above 0x7FFFFFFF. MSVC narrows it to the
+ * switch's `int` silently; C++11 calls that a narrowing conversion in a
+ * constant expression and refuses the file.
+ *
+ * The cast is written in rather than the type widened, because widening the
+ * switch would change the program and the point of this tree is to be the
+ * same program. `(int)0x887601C2` is the value the subject's own switch
+ * compares against.
+ *
+ * Bounded to eight hex digits with a high first digit so an ordinary small
+ * literal is never touched.
+ */
+const WIDE_CASE_LABEL = /\bcase\s+(0[xX][89a-fA-F][0-9a-fA-F]{7})\s*:/g;
 
 const GLOBALS_INCLUDE = '#include "gameimage.h"\n';
 
@@ -287,7 +313,8 @@ export const convert = (source: string): Conversion => {
   const spaced = dropOutOfLineDeclarations(
     rewritten
       .replace(HEX_EXPONENT_TRAP, '$1 $2 ')
-      .replace(OPERATOR_NEW_SIZE, '$1decltype(sizeof(0))'),
+      .replace(OPERATOR_NEW_SIZE, '$1decltype(sizeof(0))')
+      .replace(WIDE_CASE_LABEL, 'case (int)$1:'),
   );
   const text =
     RUNTIME_INCLUDE + (needsGlobals ? GLOBALS_INCLUDE + spaced : spaced);
