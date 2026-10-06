@@ -155,6 +155,30 @@ export class ComposeImpl
     }
     const inForce = config[0]!.toolchain_id;
 
+    // CLAIM THE ROW NOW, with `finished_at` null, and fill it in at the end.
+    //
+    // The row used to be inserted once, at the very end, with both timestamps
+    // at once. A run recompiles every reconstruction in force and takes about
+    // seven minutes, so a service that restarted inside that window erased
+    // every trace that the run had ever begun -- and this service spent part
+    // of today restarting every ten seconds on a failing schema assertion,
+    // 47 times in a row. The result was a table whose newest row was a day
+    // old, which reads as "the job never fires" and was really "the job has
+    // never been allowed to finish". Those need telling apart, and only a row
+    // written at the START can tell them apart.
+    //
+    // It also makes the honest claim about an interrupted run: it was
+    // attempted, and nothing is known about its outcome. A missing row claims
+    // it was never attempted, which is a different and false statement.
+    const runId = yield* db.insert(
+      `INSERT INTO composition_runs(
+         subject_sha, toolchain_id, started_at, finished_at, text_lo, text_hi,
+         considered, placed, not_built, too_short, outside_span, disagreeing,
+         placed_bytes, masked_bytes, overlaps, diff_bytes, unattributed_diff_bytes)
+       VALUES (?,?,?,NULL,?,?,0,0,0,0,0,0,0,0,0,0,0)`,
+      [s.sha256, inForce, startedAt, s.textLo, s.textHi],
+    );
+
     // The span comes from the subject, never written down. The Python carried
     // a literal 0x62607D -- max(va + size) over an old inventory, 9,216 bytes
     // short of the section header's end.
@@ -238,19 +262,21 @@ export class ComposeImpl
     const attributed = contributions.reduce((n, c) => n + c.diffBytes, 0);
     const overlaps = overlapsIn(corpus);
 
-    const runId = yield* db.tx(function* () {
-      const id = yield* db.insert(
-        `INSERT INTO composition_runs(
-           subject_sha, toolchain_id, started_at, finished_at, text_lo, text_hi,
-           considered, placed, not_built, too_short, outside_span, disagreeing,
-           placed_bytes, masked_bytes, overlaps, diff_bytes, unattributed_diff_bytes)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    yield* db.tx(function* () {
+      yield* db.run(
+        `UPDATE composition_runs
+            SET finished_at = ?, considered = ?, placed = ?, not_built = ?,
+                too_short = ?, outside_span = ?, disagreeing = ?,
+                placed_bytes = ?, masked_bytes = ?, overlaps = ?,
+                diff_bytes = ?, unattributed_diff_bytes = ?
+          WHERE id = ?`,
         [
-          s.sha256, inForce, startedAt, now(), s.textLo, s.textHi,
-          corpus.length, placed, notBuilt, tooShort, outsideSpan, disagreeing,
-          placedBytes, maskedBytes, overlaps.length, diffBytes, diffBytes - attributed,
+          now(), corpus.length, placed, notBuilt, tooShort, outsideSpan,
+          disagreeing, placedBytes, maskedBytes, overlaps.length, diffBytes,
+          diffBytes - attributed, runId,
         ],
       );
+      const id = runId;
       for (const c of contributions) {
         yield* db.run(
           `INSERT INTO composition_contributions(
@@ -264,7 +290,6 @@ export class ComposeImpl
           ],
         );
       }
-      return id;
     });
 
     return {

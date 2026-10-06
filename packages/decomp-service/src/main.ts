@@ -1037,8 +1037,30 @@ const supervise = () => {
         Effect.gen(function* () {
           const db = yield* modules.Db;
           const now = (yield* db.one('SELECT COUNT(*) AS n FROM proven')) as { n: number };
+
+          // A run claims its row before it starts work, so an unfinished row
+          // means one is either still going or was killed. Starting a second
+          // one alongside it would put two composers through the single
+          // compiler and make the pair take longer than either -- so a live
+          // run is waited for, and an abandoned one is not waited for
+          // forever. The cutoff is generous against the ~7 minutes a run
+          // takes; past it the row can only be a casualty of a restart.
+          const inFlight = (yield* db.one(
+            `SELECT started_at FROM composition_runs
+              WHERE finished_at IS NULL
+                AND started_at > ?
+              ORDER BY started_at DESC LIMIT 1`,
+            [Date.now() / 1000 - 1800],
+          )) as { started_at: number } | null;
+          if (inFlight !== null) return { skipped: true as const, proven: now.n };
+
+          // Compare against the last run that FINISHED. An abandoned row
+          // records an attempt and says nothing about the proven set, so
+          // treating it as the baseline would skip the work it failed to do.
           const last = (yield* db.one(
-            'SELECT considered FROM composition_runs ORDER BY id DESC LIMIT 1',
+            `SELECT considered FROM composition_runs
+              WHERE finished_at IS NOT NULL
+              ORDER BY finished_at DESC LIMIT 1`,
           )) as { considered: number } | null;
           if (last !== null && last.considered === now.n) {
             return { skipped: true as const, proven: now.n };

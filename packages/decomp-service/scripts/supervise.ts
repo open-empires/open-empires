@@ -44,6 +44,24 @@ const PROBE_MS = 10_000;
 const stamp = () => new Date().toISOString().slice(11, 19);
 const log = (m: string) => console.log(`[${stamp()}] supervisor: ${m}`);
 
+/**
+ * Write the child's output through, one stamped line at a time.
+ *
+ * Chunk boundaries do not respect lines, so a chunk is split and each line
+ * stamped individually rather than stamping the chunk: a stamp on a partial
+ * line dates the wrong thing.
+ */
+const stampThrough = (prefix: string) => (chunk: Buffer | string) => {
+  const text = String(chunk);
+  const lines = text.split('\n');
+  // A trailing '' means the chunk ended on a newline; anything else is a
+  // partial line, which is emitted as-is so a multi-line stack trace is not
+  // broken up by stamps it never had.
+  const complete = lines[lines.length - 1] === '' ? lines.slice(0, -1) : lines;
+  for (const line of complete) console.log(`[${stamp()}] ${prefix}${line}`);
+  if (lines[lines.length - 1] !== '') process.stdout.write(lines[lines.length - 1]!);
+};
+
 // One supervisor. A second would fight the first over the port and the
 // database, which is how a hand-started worker produced two of everything
 // earlier in this project.
@@ -88,9 +106,24 @@ const start = () => {
   // kill the child and the supervisor brings up the new code.
   child = spawn('bun', ['src/main.ts'], {
     cwd: ROOT,
-    stdio: 'inherit',
+    // PIPED so each line can be STAMPED, then written straight to this
+    // process's own stdout -- wherever the launcher pointed that.
+    //
+    // `inherit` passed the child's lines through untouched, and the child
+    // stamps nothing: `[claim] 0x498f80 689B described in 154ms` says what
+    // happened and not when. For six hours the question about this service
+    // was WHEN the composition job stopped firing, and the only lines that
+    // could have answered it -- the child's -- were the unstamped ones. The
+    // supervisor's own lines were stamped and were the only thing datable.
+    //
+    // Deliberately NOT a second log file: the launcher already redirects this
+    // stdout to `data/service.log`, and writing the file here as well put
+    // every line in it twice.
+    stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, PORT: String(PORT) },
   });
+  child.stdout?.on('data', stampThrough(''));
+  child.stderr?.on('data', stampThrough('stderr: '));
   log(`started pid ${child.pid}${restarts ? ` (restart ${restarts})` : ''}`);
 
   child.on('exit', (code, signal) => {
