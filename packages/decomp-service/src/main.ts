@@ -309,6 +309,7 @@ const routes = async (req: Request): Promise<Response> => {
                 agentId, num(body.va), String(body.blockedClass ?? ''),
                 String(body.eliminated ?? ''),
                 Option.getOrUndefined(str(body.source)),
+                Option.getOrUndefined(str(body.note)),
               );
               // Says that the claim is gone. It always was; nothing reported
               // it, so an agent following "your last action is a gate run on

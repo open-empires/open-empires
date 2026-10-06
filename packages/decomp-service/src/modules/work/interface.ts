@@ -171,6 +171,20 @@ export const MAX_SWEEP_FLAG_SETS = 24;
  */
 export const MAX_PROBE_SOURCES = 16;
 
+/**
+ * How many of a probe's sources compile at once.
+ *
+ * Half the gate's six slots. A probe used to compile strictly one at a time,
+ * which made the sixteen-source batch this project recommends take about
+ * three minutes at ~12s a compile -- past an agent's tool timeout, with no
+ * progress and no way to poll. Taking PART of the shared container is not the
+ * thing the sequential rule existed to prevent; taking all of it is.
+ *
+ * The gate's own throttle still bounds the total and queues fairly, so this
+ * cannot oversubscribe the container however many agents probe at once.
+ */
+export const PROBE_CONCURRENCY = 3;
+
 /** What one flag set did to one source. */
 export interface SweepOutcome {
   readonly flags: string;
@@ -263,6 +277,17 @@ export interface SweepComparison {
    * emission rather than a failure.
    */
   readonly emittedCodeSize: Option.Option<number>;
+  /**
+   * The emitted SECTION's length, beside the code length above.
+   *
+   * Both belong here because comparing them is the point: the difference is
+   * the switch tables and alignment padding MSVC lays after the code. One of
+   * them living on the outcome and the other on the comparison is what
+   * invited the mistake they exist to prevent -- a worker read
+   * `comparison.emittedSize`, got nothing because it was not here, and
+   * reported it as "present but always null".
+   */
+  readonly emittedSize: Option.Option<number>;
 }
 
 /**
@@ -623,6 +648,16 @@ export interface IWork {
     blockedClass: string,
     eliminated: string,
     source?: string,
+    /**
+     * Free prose beside the class and the eliminations.
+     *
+     * `park` used to accept this field and DROP it: the payload had no such
+     * key, so a caller got `ok: true` and an empty note, while
+     * `/api/work/parked` documents a note and returns one from a column
+     * nothing could write. A worker folded its diagnosis into `eliminated`
+     * instead, which is the field other workers filter on.
+     */
+    note?: string,
   ): EffectGen<{ readonly claimReleased: boolean }, DbError | NotClaimed | ParkWithoutReason>;
 
   /** True when a live claim was actually given back. False means the caller

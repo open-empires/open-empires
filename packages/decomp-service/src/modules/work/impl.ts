@@ -5,7 +5,7 @@ import type { DbError } from '../db/interface';
 import { SUBJECT_FLAGS, SUBJECT_FLAGS_O1, type EmittedCode } from '../gate/interface';
 import type { DisasmError, SubjectImage } from '../disasm/interface';
 import {
-  MAX_PROBE_SOURCES, MAX_SWEEP_FLAG_SETS, NoSubject, NotClaimed, NotStored,
+  MAX_PROBE_SOURCES, MAX_SWEEP_FLAG_SETS, PROBE_CONCURRENCY, NoSubject, NotClaimed, NotStored,
   UnknownFunction,
   ParkWithoutReason,
   type Claimability, type HeldClaim, type ParkedRecord,
@@ -696,37 +696,36 @@ export class WorkImpl
     }));
   }
 
-  *probe(
-    agentId: string,
+  /**
+   * One source, compiled and measured. The unit a probe runs concurrently.
+   *
+   * A source the compiler REJECTS is an outcome here, not a failed request:
+   * the whole point of a probe is to submit spellings that might be wrong, so
+   * a rejection is the expected case and one bad spelling must not discard
+   * the other fifteen.
+   */
+  private *probeOne(
     va: number,
-    sources: ReadonlyArray<string>,
+    original: Uint8Array,
+    source: string,
+    index: number,
     flags: string,
-    install?: string,
-  ): EffectGen<ProbeReport, SubmitFailure> {
+    install: string | undefined,
+  ): EffectGen<
+    { readonly outcome: ProbeOutcome; readonly emitted: Option.Option<EmittedCode> },
+    SubmitFailure
+  > {
     const gate = this.dependencies.Gate;
-    const { size, original } = yield* this.claimed(agentId, va);
-    const asked = sources.slice(0, MAX_PROBE_SOURCES);
-
-    const outcomes: ProbeOutcome[] = [];
-    /** What each source emitted, kept so the comparison needs no recompile. */
-    const emittedFor = new Map<number, Option.Option<EmittedCode>>();
-    for (const [index, source] of asked.entries()) {
-      // Sequential, like a sweep: the container is shared, and letting one
-      // diagnostic take it in parallel would stall every other agent's
-      // submissions behind it.
-      //
-      // A source that cannot be built is an outcome, not a failed request --
-      // the whole point of a probe is to submit spellings that might be
-      // wrong, so a compiler rejection is the expected case rather than an
-      // error, and one bad spelling must not discard the other fifteen.
-      const attempted = yield* Effect.result(
-        effunct(function* () {
-          return yield* gate.contribute({ va, original, source, flags, toolchain: install });
-        })(),
-      );
-      if (!Result.isSuccess(attempted)) {
-        const why: unknown = attempted.failure;
-        outcomes.push({
+    const attempted = yield* Effect.result(
+      effunct(function* () {
+        return yield* gate.contribute({ va, original, source, flags, toolchain: install });
+      })(),
+    );
+    if (!Result.isSuccess(attempted)) {
+      const why: unknown = attempted.failure;
+      return {
+        emitted: Option.none<EmittedCode>(),
+        outcome: {
           index,
           compiled: false,
           exact: false,
@@ -744,23 +743,22 @@ export class WorkImpl
                 : String(why)
             }`,
           ),
-        });
-        continue;
-      }
-      const v = attempted.success.verdict;
-      // The same measurement the sweep comparison reports, from the bytes
-      // this source emitted -- available here because the loop keeps them.
-      const entry = attempted.success.entry;
-      emittedFor.set(index, entry);
-      const differing = Option.isSome(entry)
-        ? differingFrom(original, entry.value.bytes, entry.value.relocated)
-        : undefined;
-      outcomes.push({
+        },
+      };
+    }
+    const v = attempted.success.verdict;
+    const entry = attempted.success.entry;
+    const differing = Option.isSome(entry)
+      ? differingFrom(original, entry.value.bytes, entry.value.relocated)
+      : undefined;
+    return {
+      emitted: entry,
+      outcome: {
         index,
         compiled: v.compiled,
         // The raw verdict, as `sweep` reports it, with the offset beside it.
-        // `matched` below is where both hold, which is the only combination
-        // that is a proof.
+        // `matched` is where both hold, which is the only combination that is
+        // a proof.
         exact: v.exact,
         matchedAt: v.matchedAt,
         emittedSize: v.emittedSize,
@@ -771,8 +769,58 @@ export class WorkImpl
           differing === undefined ? Option.none<number>() : Option.some(differing.length),
         differingOffsets: differing ?? [],
         detail: v.detail,
-      });
+      },
+    };
+  }
+
+
+  *probe(
+    agentId: string,
+    va: number,
+    sources: ReadonlyArray<string>,
+    flags: string,
+    install?: string,
+  ): EffectGen<ProbeReport, SubmitFailure> {
+    const gate = this.dependencies.Gate;
+    const { size, original } = yield* this.claimed(agentId, va);
+    const asked = sources.slice(0, MAX_PROBE_SOURCES);
+
+    /** What each source emitted, kept so the comparison needs no recompile. */
+    const emittedFor = new Map<number, Option.Option<EmittedCode>>();
+
+    // BOUNDED CONCURRENCY, not sequential.
+    //
+    // This was sequential, on the reasoning that letting one diagnostic take
+    // the shared container in parallel would stall every other agent's
+    // submissions. That is true of taking the WHOLE container and not of
+    // taking part of it -- and the cost of being strict about it was that the
+    // sixteen-source batch the guide recommends takes about three minutes at
+    // ~12s a compile, which exceeds an agent's tool timeout. A worker
+    // reported the recommended usage timing out, with no progress and no way
+    // to poll: the guide was recommending something that could not finish.
+    //
+    // `PROBE_CONCURRENCY` is half the gate's six slots, so a probe runs in
+    // about a third of the wall time and three slots stay free for everyone
+    // else. The gate's own throttle still bounds the total and queues
+    // fairly, so this cannot oversubscribe the container however many agents
+    // probe at once.
+    const results = yield* Effect.forEach(
+      asked.map((source, index) => ({ source, index })),
+      effunct(function* (this: WorkImpl, item: { source: string; index: number }) {
+        return yield* this.probeOne(va, original, item.source, item.index, flags, install);
+      }.bind(this)),
+      { concurrency: PROBE_CONCURRENCY },
+    );
+    const outcomes: ProbeOutcome[] = [];
+    for (const r of results) {
+      emittedFor.set(r.outcome.index, r.emitted);
+      outcomes.push(r.outcome);
     }
+    // Ordered by the index the caller submitted, because `concurrency` does
+    // not promise completion order and a caller matches an outcome back to
+    // the spelling that produced it by index.
+    outcomes.sort((a, b) => a.index - b.index);
+
 
     // Group by what was EMITTED, not by what was written. Two spellings in one
     // group are the same program to this compiler, so the axis between them is
@@ -807,6 +855,7 @@ export class WorkImpl
           differingOffsets: d,
           differingBytes: d.length,
           emittedCodeSize: yield* this.dependencies.Disasm.codeExtentOf(emitted.bytes, va),
+          emittedSize: furthest.emittedSize,
           emittedBytes: [...emitted.bytes]
             .map((b) => b.toString(16).padStart(2, '0'))
             .join(''),
@@ -1156,6 +1205,7 @@ export class WorkImpl
             return { differingOffsets: d, differingBytes: d.length };
           })(),
           emittedCodeSize: yield* disasm.codeExtentOf(emitted.bytes, va),
+          emittedSize: best.emittedSize,
         };
       }
     }
@@ -1262,6 +1312,7 @@ export class WorkImpl
     blockedClass: string,
     eliminated: string,
     source?: string,
+    note?: string,
   ): EffectGen<{ readonly claimReleased: boolean }, DbError | NotClaimed | ParkWithoutReason> {
     const db = this.dependencies.Db;
     const t = now();
@@ -1289,18 +1340,23 @@ export class WorkImpl
     let released = 0;
     yield* db.tx(function* () {
       yield* db.run(
-        `INSERT INTO near_misses(subject_sha, va, blocked_class, eliminated, source, updated_at)
-         SELECT c.subject_sha, ?, ?, ?, ?, ? FROM current_config c WHERE c.only_row = 1
+        `INSERT INTO near_misses(subject_sha, va, blocked_class, eliminated, source,
+                                 note, updated_at)
+         SELECT c.subject_sha, ?, ?, ?, ?, ?, ? FROM current_config c WHERE c.only_row = 1
          ON CONFLICT(subject_sha, va) DO UPDATE SET
            blocked_class = excluded.blocked_class,
            eliminated = excluded.eliminated,
+           -- Same rule as source: a re-park carrying no note must not erase
+           -- the one already there.
+           note = COALESCE(excluded.note, near_misses.note),
            -- A re-park that carries no source must not ERASE the one already
            -- there. A worker corrects an eliminated field far more often
            -- than it has a better candidate, and losing the candidate to a
            -- text edit is the failure this column was added to prevent.
            source = COALESCE(excluded.source, near_misses.source),
            updated_at = excluded.updated_at`,
-        [va, blockedClass, eliminated, candidate, t],
+        [va, blockedClass, eliminated, candidate,
+         note !== undefined && note.trim() !== '' ? note : null, t],
       );
       released = yield* db.run(
         `UPDATE claims SET released_at = ? WHERE va = ? AND agent_id = ? AND released_at IS NULL`,

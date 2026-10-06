@@ -140,6 +140,10 @@ export const SweepReportWire = Schema.Struct({
        *  and the inventory's extent does not -- subtracting one from the other
        *  invented a 520-byte phantom fault for a round. */
       emittedCodeSize: Schema.OptionFromNullOr(Schema.Number),
+      /** The SECTION's length, beside the code length. The difference between
+       *  them is the trailing jump tables and padding, and comparing them is
+       *  the point -- so both are here rather than one on the outcome. */
+      emittedSize: Schema.OptionFromNullOr(Schema.Number),
       emittedBytes: Schema.String,
       emittedListing: Schema.String,
       subjectListing: Schema.String,
@@ -263,6 +267,10 @@ export const ProbeReportWire = Schema.Struct({
        *  and the inventory's extent does not -- subtracting one from the other
        *  invented a 520-byte phantom fault for a round. */
       emittedCodeSize: Schema.OptionFromNullOr(Schema.Number),
+      /** The SECTION's length, beside the code length. The difference between
+       *  them is the trailing jump tables and padding, and comparing them is
+       *  the point -- so both are here rather than one on the outcome. */
+      emittedSize: Schema.OptionFromNullOr(Schema.Number),
       emittedBytes: Schema.String,
       emittedListing: Schema.String,
       subjectListing: Schema.String,
