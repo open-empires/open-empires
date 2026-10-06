@@ -5,6 +5,7 @@ import type { DbError } from '../db/interface';
 import type { DisasmError, SubjectImage } from '../disasm/interface';
 import type { SubjectIoError, SubjectParseError } from '../subject/interface';
 import {
+  type ReferenceDiscovery,
   DiscoveryFailed,
   type Candidate, type Evidence, type ExpansionReport, type IDiscovery,
   type Remeasurement, type RejectionOutcome, type WorkabilityAudit,
@@ -173,6 +174,64 @@ export class DiscoveryImpl
       }
     }
     return yield* this.record(candidates, img, vas.length);
+  }
+
+  *discoverByReference(add: boolean): EffectGen<ReferenceDiscovery, Failure> {
+    const db = this.dependencies.Db;
+    const disasm = this.dependencies.Disasm;
+    const img = yield* this.image();
+    const sha = yield* this.subjectSha();
+    const known = yield* this.inventory();
+
+    const found = yield* disasm.discover(img, known.map((f) => ({ va: f.va, size: f.size })));
+
+    const rejected = new Set(
+      (yield* db.all('SELECT va FROM rejected_entries WHERE subject_sha = ?', [sha]))
+        .map((r: unknown) => (r as { va: number }).va),
+    );
+
+    // One call for the whole set rather than one per address: the decoder is
+    // the expensive part and this is thousands of candidates.
+    const generated = new Set(
+      yield* disasm.compilerGenerated(
+        img,
+        found.found.map((f) => ({ va: f.va, size: f.size })),
+      ),
+    );
+
+    let added = 0;
+    let compilerGenerated = 0;
+    let rejectedOnRecord = 0;
+    for (const f of found.found) {
+      if (generated.has(f.va)) { compilerGenerated += 1; continue; }
+      if (rejected.has(f.va)) { rejectedOnRecord += 1; continue; }
+      if (!add) continue;
+      added += yield* db.run(
+        `INSERT INTO functions(subject_sha, va, size, discovered_by)
+         VALUES (?,?,?,?) ON CONFLICT(subject_sha, va) DO NOTHING`,
+        [sha, f.va, f.size, `reference: ${f.evidence.join('+')}`],
+      );
+    }
+
+    const byReason = new Map<string, number>();
+    for (const r of found.rejected) {
+      byReason.set(r.reason, (byReason.get(r.reason) ?? 0) + 1);
+    }
+
+    return {
+      candidates: found.found.length + found.rejected.length,
+      measured: found.found.length,
+      added,
+      compilerGenerated,
+      rejectedOnRecord,
+      refusals: [...byReason.entries()]
+        .map(([reason, addresses]) => ({ reason, addresses }))
+        .sort((a, b) => b.addresses - a.addresses),
+      largest: [...found.found]
+        .sort((a, b) => b.size - a.size)
+        .slice(0, 10)
+        .map((f) => ({ va: f.va, size: f.size })),
+    };
   }
 
   *scanGaps(add: boolean): EffectGen<GapReport, Failure> {

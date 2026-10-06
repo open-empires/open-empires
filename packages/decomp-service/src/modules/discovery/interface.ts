@@ -191,6 +191,25 @@ export interface GapReport {
   }>;
 }
 
+/** What a reference-evidence pass found, and what it refused. */
+export interface ReferenceDiscovery {
+  /** Addresses carrying reference evidence that no inventory entry covers. */
+  readonly candidates: number;
+  /** Of those, the ones whose extent measured. */
+  readonly measured: number;
+  readonly added: number;
+  /** Measured, and left out because the decoder calls them compiler-generated:
+   *  unwind funclets have no source of their own and 96 were once transcribed
+   *  as naked assembly before that was understood. */
+  readonly compilerGenerated: number;
+  /** Measured, and left out because the address is on record as NOT an entry. */
+  readonly rejectedOnRecord: number;
+  /** Why the rest could not be measured, by reason. */
+  readonly refusals: ReadonlyArray<{ readonly reason: string; readonly addresses: number }>;
+  /** The largest finds, for a reader. */
+  readonly largest: ReadonlyArray<{ readonly va: number; readonly size: number }>;
+}
+
 export interface IDiscovery {
   /**
    * Harvest entries from specific proven functions. Called when a proof
@@ -253,6 +272,31 @@ export interface IDiscovery {
    * evidence of an entry than any rule here; a rejection that could overrule
    * a proof would let a judgement delete a fact.
    */
+  /**
+   * Find entries from REFERENCE EVIDENCE: a direct call, or a dword outside
+   * the executable span holding the address -- which is what a vtable slot
+   * is.
+   *
+   * This is the strongest rule the project has, and nothing was running it.
+   * `Disasm.discover` has been implemented the whole time with no caller, no
+   * route and no job, while the inventory grew from layout instead: splitting
+   * on alignment padding, which is right about nine times in ten. The
+   * reference rule is independent of layout and far better than that -- a
+   * worker measured it at 7,007 of 7,400 entries and 3,365 of 3,371 PROVEN
+   * functions named by it, and flow closure capped at the next evidenced
+   * address reproduced 248 of 250 random proven sizes exactly.
+   *
+   * It is worth running now rather than earlier because the extent
+   * measurement it depends on could not close a function whose switch table
+   * follows its last terminator, nor recognise MSVC's `8b ff` filler. Both
+   * are fixed, and 749 spans that could not be measured at all now can.
+   *
+   * Compiler-generated spans are measured and never recorded, and recorded
+   * rejections are honoured, for the same reasons the gap scan honours both.
+   */
+  discoverByReference(add: boolean):
+    EffectGen<ReferenceDiscovery, DbError | DisasmError | SubjectIoError | SubjectParseError | DiscoveryFailed>;
+
   /**
    * Withdraw a rejection, so the address can be recorded as an entry again.
    *

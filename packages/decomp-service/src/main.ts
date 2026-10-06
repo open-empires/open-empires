@@ -612,6 +612,7 @@ const routes = async (req: Request): Promise<Response> => {
 
   // /api/discovery              how the inventory is growing, and from what
   // /api/discovery/expand       harvest entries from every proven function
+  // /api/discovery/reference     entries from reference evidence -- the strongest rule
   // /api/discovery/remeasure    check recorded sizes against the bytes
   //
   // Discovery used to be a one-off script run by hand, which is how its
@@ -779,6 +780,21 @@ const routes = async (req: Request): Promise<Response> => {
           // An entry an agent established by reading the bytes. Checked, not
           // trusted: it must decode, it must measure, and it must not sit
           // inside a function that has a proof.
+          // The strongest rule the project has, and nothing was running it:
+          // `Disasm.discover` had no caller, no route and no job while the
+          // inventory grew from layout instead.
+          if (seg[2] === 'reference') {
+            const r = yield* d.discoverByReference(body.add === true);
+            return {
+              candidates: r.candidates,
+              measured: r.measured,
+              added: r.added,
+              compilerGenerated: r.compilerGenerated,
+              rejectedOnRecord: r.rejectedOnRecord,
+              refusals: r.refusals,
+              largest: r.largest.map((f) => ({ va: `0x${f.va.toString(16)}`, size: f.size })),
+            };
+          }
           if (seg[2] === 'unreject') {
             const entries = Array.isArray(body.entries)
               ? body.entries.flatMap((e) => {
