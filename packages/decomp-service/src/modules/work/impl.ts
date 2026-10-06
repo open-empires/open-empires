@@ -621,7 +621,7 @@ export class WorkImpl
           index,
           compiled: false,
           exact: false,
-          matchedAtEntry: false,
+          matchedAt: Option.none(),
           emittedSize: Option.none(),
           masked: Option.none(),
           firstDiff: Option.none(),
@@ -640,8 +640,11 @@ export class WorkImpl
       outcomes.push({
         index,
         compiled: v.compiled,
+        // The raw verdict, as `sweep` reports it, with the offset beside it.
+        // `matched` below is where both hold, which is the only combination
+        // that is a proof.
         exact: v.exact,
-        matchedAtEntry: Option.getOrElse(v.matchedAt, () => -1) === 0,
+        matchedAt: v.matchedAt,
         emittedSize: v.emittedSize,
         masked: Option.some(v.masked),
         firstDiff: v.firstDiff,
@@ -667,7 +670,9 @@ export class WorkImpl
       size,
       flags,
       outcomes,
-      matched: outcomes.filter((o) => o.matchedAtEntry).map((o) => o.index),
+      matched: outcomes
+        .filter((o) => o.exact && Option.getOrElse(o.matchedAt, () => -1) === 0)
+        .map((o) => o.index),
       identical: [...byBytes.entries()]
         .map(([emittedSha, indices]) => ({ emittedSha, indices }))
         .sort((a, b) => b.indices.length - a.indices.length),
@@ -690,6 +695,10 @@ export class WorkImpl
       `SELECT f.va AS va, f.size AS size,
               EXISTS(SELECT 1 FROM proven p
                       WHERE p.subject_sha = f.subject_sha AND p.va = f.va) AS proven,
+              (SELECT n.blocked_class FROM near_misses n
+                WHERE n.subject_sha = f.subject_sha AND n.va = f.va) AS blocked_class,
+              EXISTS(SELECT 1 FROM near_misses n2
+                      WHERE n2.subject_sha = f.subject_sha AND n2.va = f.va) AS parked,
               (SELECT cl.agent_id FROM claims cl
                 WHERE cl.subject_sha = f.subject_sha AND cl.va = f.va
                   AND cl.released_at IS NULL AND cl.expires_at > ?
@@ -704,6 +713,7 @@ export class WorkImpl
       [at, at, ...vas],
     )) as ReadonlyArray<{
       va: number; size: number; proven: number;
+      blocked_class: string | null; parked: number;
       held_by: string | null; expires_at: number | null;
     }>;
     const found = new Map(rows.map((r) => [r.va, r]));
@@ -714,8 +724,11 @@ export class WorkImpl
           va,
           reason: 'not-in-inventory' as const,
           size: Option.none(),
-          heldBy: Option.none(),
-          secondsLeft: Option.none(),
+          proven: false,
+          parked: false,
+          blockedClass: Option.none<string>(),
+          heldBy: Option.none<string>(),
+          secondsLeft: Option.none<number>(),
         };
       }
       const reason = r.size === 0
@@ -729,7 +742,11 @@ export class WorkImpl
         va,
         reason,
         size: Option.some(r.size),
-        heldBy: reason === 'held-by-another' ? Option.fromNullishOr(r.held_by) : Option.none(),
+        proven: r.proven === 1,
+        parked: r.parked === 1,
+        blockedClass: Option.fromNullishOr(r.blocked_class),
+        heldBy:
+          reason === 'held-by-another' ? Option.fromNullishOr(r.held_by) : Option.none<string>(),
         secondsLeft:
           reason === 'held-by-another' && r.expires_at !== null
             ? Option.some(Math.round(r.expires_at - at))

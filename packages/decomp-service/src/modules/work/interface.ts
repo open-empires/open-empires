@@ -249,6 +249,21 @@ export interface Claimability {
   readonly va: number;
   readonly reason: ClaimabilityReason;
   readonly size: Option.Option<number>;
+  /**
+   * Whether a proof exists, and whether it is parked, INDEPENDENTLY of
+   * `reason`.
+   *
+   * `reason` is one mutually-exclusive verdict about claiming, and parked is
+   * not one of its values: a parked function can still be claimed by explicit
+   * address, which is how a second pass happens. So "is this proven / parked /
+   * an entry at all" could not be answered for one address by any route, and a
+   * worker read the database to find out. These two fields make this the one
+   * place to ask.
+   */
+  readonly proven: boolean;
+  readonly parked: boolean;
+  /** The class it was parked under, when it is parked. */
+  readonly blockedClass: Option.Option<string>;
   /** Who holds it, when the reason is `held-by-another`. */
   readonly heldBy: Option.Option<string>;
   readonly secondsLeft: Option.Option<number>;
@@ -295,8 +310,28 @@ export interface ProbeOutcome {
    *  matched back to the spelling that produced it. */
   readonly index: number;
   readonly compiled: boolean;
+  /**
+   * The gate's verdict on the bytes, which is NOT on its own a proof.
+   *
+   * A probe is a diagnostic and reports the raw facts, exactly as `sweep`
+   * does: this is true for a match at any offset. The rule across both is one
+   * rule -- a proof is `exact` AND `matchedAt` 0 -- and `matched` below is the
+   * list of indices where both hold.
+   *
+   * `submit` and `amend` are different on purpose: they return the
+   * conjunction, because what they return is acted on as a proof.
+   */
   readonly exact: boolean;
-  readonly matchedAtEntry: boolean;
+  /**
+   * Where the bytes matched: 0 at the entry, a positive offset for a fragment
+   * match, None for no match.
+   *
+   * A probe carried no such field at all, so a worker reading `matchedAt` on
+   * each outcome got `null` every time and could not tell an entry match from
+   * a fragment -- which is the weaker claim that has already let three
+   * reconstructions pass on a correct sibling's bytes.
+   */
+  readonly matchedAt: Option.Option<number>;
   readonly emittedSize: Option.Option<number>;
   readonly masked: Option.Option<number>;
   readonly firstDiff: Option.Option<number>;
@@ -309,7 +344,8 @@ export interface ProbeReport {
   readonly size: number;
   readonly flags: string;
   readonly outcomes: ReadonlyArray<ProbeOutcome>;
-  /** Indices of sources that matched at the entry. Empty is the usual answer. */
+  /** Indices of sources that are exact at the entry. Empty is the usual
+   *  answer. */
   readonly matched: ReadonlyArray<number>;
   /**
    * Sources grouped by the bytes they emitted, largest group first.

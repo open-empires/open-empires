@@ -320,6 +320,13 @@ const routes = async (req: Request): Promise<Response> => {
                   va: `0x${c.va.toString(16)}`,
                   reason: c.reason,
                   size: Option.getOrNull(c.size),
+                  // Reported beside `reason`, not folded into it: a parked
+                  // function CAN still be claimed by explicit address, which
+                  // is how a second pass happens, so parked is not one of the
+                  // mutually-exclusive claim verdicts.
+                  proven: c.proven,
+                  parked: c.parked,
+                  blockedClass: Option.getOrNull(c.blockedClass),
                   heldBy: Option.getOrNull(c.heldBy),
                   secondsLeft: Option.getOrNull(c.secondsLeft),
                 })),

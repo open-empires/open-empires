@@ -217,8 +217,11 @@ export const ProbeReportWire = Schema.Struct({
     Schema.Struct({
       index: Schema.Number,
       compiled: Schema.Boolean,
+      /** The gate's raw verdict, true for a match at ANY offset -- as on a
+       *  sweep. A proof is this AND `matchedAt` 0, which is what `matched`
+       *  lists. */
       exact: Schema.Boolean,
-      matchedAtEntry: Schema.Boolean,
+      matchedAt: Schema.OptionFromNullOr(Schema.Number),
       emittedSize: Schema.OptionFromNullOr(Schema.Number),
       masked: Schema.OptionFromNullOr(Schema.Number),
       firstDiff: Schema.OptionFromNullOr(Schema.Number),

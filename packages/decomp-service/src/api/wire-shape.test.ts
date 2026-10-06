@@ -152,13 +152,13 @@ test('a probe reports its groups and digests as plain values', () => {
     flags: '/O2 /GX /GR-',
     outcomes: [
       {
-        index: 0, compiled: true, exact: true, matchedAtEntry: true,
+        index: 0, compiled: true, exact: true, matchedAt: Option.some(0),
         emittedSize: Option.some(16), masked: Option.some(0),
         firstDiff: Option.none(), emittedSha: Option.some('a'.repeat(64)),
         detail: Option.none(),
       },
       {
-        index: 1, compiled: false, exact: false, matchedAtEntry: false,
+        index: 1, compiled: false, exact: false, matchedAt: Option.none(),
         emittedSize: Option.none(), masked: Option.none(),
         firstDiff: Option.none(), emittedSha: Option.none(),
         detail: Option.some("error C2065: 'q' : undeclared identifier"),
