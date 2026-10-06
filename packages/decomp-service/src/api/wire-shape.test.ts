@@ -155,12 +155,14 @@ test('a probe reports its groups and digests as plain values', () => {
         index: 0, compiled: true, exact: true, matchedAt: Option.some(0),
         emittedSize: Option.some(16), masked: Option.some(0),
         firstDiff: Option.none(), emittedSha: Option.some('a'.repeat(64)),
+        differingBytes: Option.some(0), differingOffsets: [],
         detail: Option.none(),
       },
       {
         index: 1, compiled: false, exact: false, matchedAt: Option.none(),
         emittedSize: Option.none(), masked: Option.none(),
         firstDiff: Option.none(), emittedSha: Option.none(),
+        differingBytes: Option.none(), differingOffsets: [],
         detail: Option.some("error C2065: 'q' : undeclared identifier"),
       },
     ],
@@ -177,6 +179,10 @@ test('a probe reports its groups and digests as plain values', () => {
   // wrong, so one bad one must not discard the rest.
   expect(r.outcomes[1]!.compiled).toBe(false);
   expect(r.outcomes[1]!.emittedSha).toBeNull();
+  // The count the guide tells agents to steer by reaches a probe outcome, and
+  // is null rather than 0 when nothing compiled -- 0 would read as "identical".
+  expect(r.outcomes[0]!.differingBytes).toBe(0);
+  expect(r.outcomes[1]!.differingBytes).toBeNull();
   expect(String(r.outcomes[1]!.detail)).toContain('C2065');
 });
 

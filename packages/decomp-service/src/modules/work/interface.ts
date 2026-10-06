@@ -247,6 +247,22 @@ export interface SweepComparison {
    *  Carried beside the list so a caller can see progress without parsing
    *  it. */
   readonly differingBytes: number;
+  /**
+   * Where the emitted CODE ends, as distinct from where the emitted section
+   * ends.
+   *
+   * MSVC puts a switch's jump tables in the same section right after the
+   * code, so `emittedSize` counts them and the inventory's extent does not.
+   * Subtracting one from the other invents a difference, and it did:
+   * 0x428190 carried a recorded "~520 bytes are a SEPARATE fault" for a
+   * round, because 539 of its 794-byte surplus are two switch tables and an
+   * alignment pad. Code against code the surplus is 255, of which 227 is its
+   * own blocked class to the byte.
+   *
+   * `None` when the emitted bytes do not close, which is a fact about the
+   * emission rather than a failure.
+   */
+  readonly emittedCodeSize: Option.Option<number>;
 }
 
 /**
@@ -358,6 +374,19 @@ export interface ProbeOutcome {
   readonly masked: Option.Option<number>;
   readonly firstDiff: Option.Option<number>;
   readonly emittedSha: Option.Option<string>;
+  /**
+   * How many bytes differ from the subject, relocations excused, and where.
+   *
+   * A probe reported neither, while the guide tells agents to steer by the
+   * count rather than by `firstDiff` -- so on the very call built for
+   * comparing many spellings, the number they are told to compare was
+   * missing. A worker spent two extra sweeps purely to learn whether a probe
+   * group sitting at an unchanged `firstDiff` was nearer or further.
+   *
+   * `None` when nothing compiled.
+   */
+  readonly differingBytes: Option.Option<number>;
+  readonly differingOffsets: ReadonlyArray<number>;
   readonly detail: Option.Option<string>;
 }
 

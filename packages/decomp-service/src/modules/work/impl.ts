@@ -16,6 +16,39 @@ import {
 } from './interface';
 
 const now = () => Date.now() / 1000;
+
+/**
+ * Every offset where the emitted code differs from the subject, relocation
+ * fields already excused.
+ *
+ * Shared by the sweep comparison and by every probe outcome. It was inline in
+ * the sweep only, so a probe could report no count at all -- while the guide
+ * tells agents to steer by the count and not by `firstDiff`. A worker spent
+ * two extra sweeps for want of it, purely to learn whether a probe group
+ * sitting at an unchanged `firstDiff` was nearer or further.
+ */
+const differingFrom = (
+  original: Uint8Array,
+  emitted: Uint8Array,
+  relocated: ReadonlySet<number>,
+): ReadonlyArray<number> => {
+  // Compared over the SUBJECT's length: the emitted section is padded to its
+  // alignment and a switch's tables sit after its code, so comparing the
+  // longer array would report padding as a difference.
+  const n = Math.min(original.length, emitted.length);
+  const differing: number[] = [];
+  for (let k = 0; k < n; k += 1) {
+    if (relocated.has(k)) continue;
+    if (emitted[k] !== original[k]) differing.push(k);
+  }
+  // A length shortfall is a real difference and must not vanish because the
+  // loop stopped at the shorter array: a byte the subject has and the
+  // emission does not is missing, and missing is a difference.
+  for (let k = n; k < original.length; k += 1) {
+    if (!relocated.has(k)) differing.push(k);
+  }
+  return differing;
+};
 const sha = (s: string) => new Bun.CryptoHasher('sha256').update(s).digest('hex');
 const optNum = (v: unknown): Option.Option<number> =>
   v === null || v === undefined ? Option.none() : Option.some(Number(v));
@@ -700,6 +733,8 @@ export class WorkImpl
           masked: Option.none(),
           firstDiff: Option.none(),
           emittedSha: Option.none(),
+          differingBytes: Option.none(),
+          differingOffsets: [],
           detail: Option.some(
             `could not be built: ${
               typeof why === 'object' && why !== null && 'reason' in why
@@ -711,6 +746,12 @@ export class WorkImpl
         continue;
       }
       const v = attempted.success.verdict;
+      // The same measurement the sweep comparison reports, from the bytes
+      // this source emitted -- available here because the loop keeps them.
+      const entry = attempted.success.entry;
+      const differing = Option.isSome(entry)
+        ? differingFrom(original, entry.value.bytes, entry.value.relocated)
+        : undefined;
       outcomes.push({
         index,
         compiled: v.compiled,
@@ -723,6 +764,9 @@ export class WorkImpl
         masked: Option.some(v.masked),
         firstDiff: v.firstDiff,
         emittedSha: v.emittedSha,
+        differingBytes:
+          differing === undefined ? Option.none<number>() : Option.some(differing.length),
+        differingOffsets: differing ?? [],
         detail: v.detail,
       });
     }
@@ -1068,25 +1112,11 @@ export class WorkImpl
           // The linker fills these, so a difference at one of them is not a
           // difference in the reconstruction.
           relocatedOffsets: [...emitted.relocated].sort((a, b) => a - b),
-          // Compared over the SUBJECT's length, which is what the function
-          // occupies; the emitted section is padded to its alignment and a
-          // switch's tables sit after its code, so comparing the longer of
-          // the two would report padding as a difference.
           ...(() => {
-            const n = Math.min(original.length, emitted.bytes.length);
-            const differing: number[] = [];
-            for (let k = 0; k < n; k += 1) {
-              if (emitted.relocated.has(k)) continue;
-              if (emitted.bytes[k] !== original[k]) differing.push(k);
-            }
-            // A length disagreement is a real difference and must not vanish
-            // because the loop stopped at the shorter array. Every byte the
-            // subject has beyond what was emitted is missing, and counts.
-            for (let k = n; k < original.length; k += 1) {
-              if (!emitted.relocated.has(k)) differing.push(k);
-            }
-            return { differingOffsets: differing, differingBytes: differing.length };
+            const d = differingFrom(original, emitted.bytes, emitted.relocated);
+            return { differingOffsets: d, differingBytes: d.length };
           })(),
+          emittedCodeSize: yield* disasm.codeExtentOf(emitted.bytes, va),
         };
       }
     }

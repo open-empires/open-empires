@@ -395,6 +395,24 @@ export interface IDisasm {
   ): EffectGen<ReadonlyArray<number>, DisasmError>;
 
   /**
+   * Where the CODE ends in a freshly emitted function, as distinct from where
+   * the emitted section ends.
+   *
+   * MSVC emits a switch's jump tables into the same section, right after the
+   * code, so `emittedSize` counts them and the inventory's extent does not.
+   * Comparing the two therefore invents a difference. It did exactly that:
+   * 0x428190 carried a recorded "~520 bytes are a SEPARATE fault" for a round
+   * because its surplus was measured as emittedSize(2528) - size(1734), and
+   * 539 of those bytes are the two switch tables and an alignment pad. Code
+   * against code the surplus is 255, and 227 of it is the function's own
+   * blocked class to the byte.
+   *
+   * `None` when the bytes do not close -- which is a fact about the emission,
+   * not a failure.
+   */
+  codeExtentOf(bytes: Uint8Array, baseVa: number): EffectGen<Option.Option<number>, DisasmError>;
+
+  /**
    * The three shape facts that predict whether a function can be finished,
    * measured from its own instructions.
    *

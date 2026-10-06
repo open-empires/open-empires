@@ -209,6 +209,27 @@ export class DisasmImpl extends implementing(modules.Disasm) implements IDisasm 
     );
   }
 
+  *codeExtentOf(
+    bytes: Uint8Array,
+    baseVa: number,
+  ): EffectGen<Option.Option<number>, DisasmError> {
+    return yield* this.decoding((d) => {
+      // The emitted object treated as its own little image, so the one
+      // implementation of "where does this function end" answers for it too.
+      // `textLo`/`textHi` bound the span, which is what lets the trailing
+      // jump-table test recognise a table as in-range addresses.
+      const image: SubjectImage = {
+        sha256: '',
+        bytes,
+        imageBase: baseVa,
+        textLo: baseVa,
+        textHi: baseVa + bytes.length,
+      };
+      const measured = body(d, image, baseVa, baseVa + bytes.length);
+      return typeof measured === 'number' ? Option.some(measured) : Option.none<number>();
+    });
+  }
+
   *closability(
     subject: SubjectImage,
     functions: ReadonlyArray<FunctionExtent>,

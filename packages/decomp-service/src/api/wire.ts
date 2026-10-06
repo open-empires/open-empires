@@ -135,6 +135,11 @@ export const SweepReportWire = Schema.Struct({
        *  everything behind it was being fixed. */
       differingOffsets: Schema.Array(Schema.Number),
       differingBytes: Schema.Number,
+      /** Where the emitted CODE ends, as distinct from the section. MSVC puts
+       *  a switch's jump tables after the code, so `emittedSize` counts them
+       *  and the inventory's extent does not -- subtracting one from the other
+       *  invented a 520-byte phantom fault for a round. */
+      emittedCodeSize: Schema.OptionFromNullOr(Schema.Number),
       emittedBytes: Schema.String,
       emittedListing: Schema.String,
       subjectListing: Schema.String,
@@ -226,6 +231,11 @@ export const ProbeReportWire = Schema.Struct({
       masked: Schema.OptionFromNullOr(Schema.Number),
       firstDiff: Schema.OptionFromNullOr(Schema.Number),
       emittedSha: Schema.OptionFromNullOr(Schema.String),
+      /** How many bytes differ from the subject and where, relocations
+       *  excused. The figure the guide tells agents to steer by, which a
+       *  probe did not carry. */
+      differingBytes: Schema.OptionFromNullOr(Schema.Number),
+      differingOffsets: Schema.Array(Schema.Number),
       detail: Schema.OptionFromNullOr(Schema.String),
     }),
   ),
