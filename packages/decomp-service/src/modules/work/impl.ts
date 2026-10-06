@@ -708,6 +708,8 @@ export class WorkImpl
     const asked = sources.slice(0, MAX_PROBE_SOURCES);
 
     const outcomes: ProbeOutcome[] = [];
+    /** What each source emitted, kept so the comparison needs no recompile. */
+    const emittedFor = new Map<number, Option.Option<EmittedCode>>();
     for (const [index, source] of asked.entries()) {
       // Sequential, like a sweep: the container is shared, and letting one
       // diagnostic take it in parallel would stall every other agent's
@@ -749,6 +751,7 @@ export class WorkImpl
       // The same measurement the sweep comparison reports, from the bytes
       // this source emitted -- available here because the loop keeps them.
       const entry = attempted.success.entry;
+      emittedFor.set(index, entry);
       const differing = Option.isSome(entry)
         ? differingFrom(original, entry.value.bytes, entry.value.relocated)
         : undefined;
@@ -783,11 +786,47 @@ export class WorkImpl
       else group.push(o.index);
     }
 
+    // The source that got FURTHEST, rendered the way a sweep renders it. Only
+    // one: the listings are the expensive part and the other fifteen would
+    // answer a question nobody asked.
+    const furthest = outcomes
+      .filter((o) => o.compiled)
+      .sort(
+        (a, b) =>
+          Option.getOrElse(b.firstDiff, () => -1) - Option.getOrElse(a.firstDiff, () => -1),
+      )[0];
+    let comparison: SweepComparison | undefined;
+    if (furthest !== undefined) {
+      const stored = emittedFor.get(furthest.index) ?? Option.none<EmittedCode>();
+      if (Option.isSome(stored)) {
+        const emitted = stored.value;
+        const d = differingFrom(original, emitted.bytes, emitted.relocated);
+        comparison = {
+          flags,
+          firstDiff: furthest.firstDiff,
+          differingOffsets: d,
+          differingBytes: d.length,
+          emittedCodeSize: yield* this.dependencies.Disasm.codeExtentOf(emitted.bytes, va),
+          emittedBytes: [...emitted.bytes]
+            .map((b) => b.toString(16).padStart(2, '0'))
+            .join(''),
+          emittedListing: yield* this.dependencies.Disasm.listingOfBytes(
+            emitted.bytes, va, `EMITTED (source ${furthest.index})`,
+          ),
+          subjectListing: yield* this.dependencies.Disasm.listingOfBytes(
+            original, va, 'SUBJECT',
+          ),
+          relocatedOffsets: [...emitted.relocated].sort((a, b) => a - b),
+        };
+      }
+    }
+
     return {
       va,
       size,
       flags,
       outcomes,
+      comparison,
       matched: outcomes
         .filter((o) => o.exact && Option.getOrElse(o.matchedAt, () => -1) === 0)
         .map((o) => o.index),

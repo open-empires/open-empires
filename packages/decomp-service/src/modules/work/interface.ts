@@ -413,6 +413,22 @@ export interface ProbeReport {
     readonly emittedSha: string;
     readonly indices: ReadonlyArray<number>;
   }>;
+  /**
+   * What the best source actually compiled to, beside the subject -- the same
+   * object a sweep returns.
+   *
+   * A probe returned no listings, so a worker who needed to SEE a divergence
+   * had to spend a sixteen-flag-set sweep on a function it already knew
+   * wanted `/O2 /GX /GR-`. Two workers asked for this; one of them then
+   * compared a sweep's comparison against a probe outcome and reported the
+   * two tools disagreeing on `firstDiff`. They do not: a sweep's comparison
+   * is for whichever FLAG SET got furthest, so the two numbers were about
+   * different builds. Giving a probe its own comparison removes both the
+   * wasted sweeps and the reason to compare across tools at all.
+   *
+   * Absent when nothing compiled.
+   */
+  readonly comparison?: SweepComparison;
 }
 
 export interface SweepReport {

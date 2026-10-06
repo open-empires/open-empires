@@ -246,6 +246,29 @@ export const ProbeReportWire = Schema.Struct({
       indices: Schema.Array(Schema.Number),
     }),
   ),
+  /** The same comparison a sweep returns, for the source that got furthest.
+   *  A probe used to return no listings, so seeing a divergence cost a
+   *  sixteen-flag-set sweep on a function whose flags were already known. */
+  comparison: Schema.optional(
+    Schema.Struct({
+      flags: Schema.String,
+      firstDiff: Schema.OptionFromNullOr(Schema.Number),
+      /** Every differing offset, relocations already excused, and the count.
+       *  `firstDiff` alone has twice reported no progress while almost
+       *  everything behind it was being fixed. */
+      differingOffsets: Schema.Array(Schema.Number),
+      differingBytes: Schema.Number,
+      /** Where the emitted CODE ends, as distinct from the section. MSVC puts
+       *  a switch's jump tables after the code, so `emittedSize` counts them
+       *  and the inventory's extent does not -- subtracting one from the other
+       *  invented a 520-byte phantom fault for a round. */
+      emittedCodeSize: Schema.OptionFromNullOr(Schema.Number),
+      emittedBytes: Schema.String,
+      emittedListing: Schema.String,
+      subjectListing: Schema.String,
+      relocatedOffsets: Schema.Array(Schema.Number),
+    }),
+  ),
 });
 
 export const encodeProbe = Schema.encodeUnknownSync(ProbeReportWire);
