@@ -136,3 +136,85 @@ test('a hex literal not ending in e is left alone', () => {
   const out = converted('void f() { char p[0x4f-4]; (void)p; }\n');
   expect(out.text).toContain('0x4f-4');
 });
+
+/**
+ * The out-of-line member declaration MSVC accepts and clang refuses.
+ *
+ * The removal is a COMPUTED DELETION, which is the dangerous kind: the shape
+ * of `void S::g();` is also the shape of a qualified call statement, so these
+ * tests exist mainly to pin down what must NOT be removed.
+ */
+test('a bare out-of-line member declaration is dropped', () => {
+  const out = convert(
+    '#pragma pack(push,1)\n' +
+      'struct S { void g(); void f(int x); };\n' +
+      'void S::g();\n' +
+      'void S::f(int x) { if (x) g(); }\n' +
+      '#pragma pack(pop)\n',
+  );
+  expect(out.state).toBe('converted');
+  if (out.state !== 'converted') return;
+  expect(out.text).not.toContain('void S::g();');
+  // The definition beside it survives untouched.
+  expect(out.text).toContain('void S::f(int x) { if (x) g(); }');
+  // And so does the in-class declaration, which is what makes the call legal.
+  expect(out.text).toContain('void g();');
+});
+
+test('a qualified call statement inside a body is NOT dropped', () => {
+  // This is the failure the brace-depth walk exists to prevent: the line
+  // matches the declaration pattern exactly, and deleting it would remove a
+  // real statement from a build meant to run.
+  const src =
+    'struct S { static void f(int); };\n' +
+    'void run() {\n' +
+    '  S::f(1);\n' +
+    '}\n';
+  const out = convert(src);
+  expect(out.state).toBe('converted');
+  if (out.state !== 'converted') return;
+  expect(out.text).toContain('S::f(1);');
+});
+
+test('a destructor definition and a multi-line definition both survive', () => {
+  const out = convert(
+    'struct S { ~S(); int v; };\n' +
+      'S::~S()\n' +
+      '{\n' +
+      '  v = 0;\n' +
+      '}\n',
+  );
+  expect(out.state).toBe('converted');
+  if (out.state !== 'converted') return;
+  expect(out.text).toContain('S::~S()');
+  expect(out.text).toContain('v = 0;');
+});
+
+test("operator new's win32 parameter becomes size_t without a header", () => {
+  // MSVC's size_t on win32 is `unsigned int` and the source is right to say
+  // so; on wasm32 it is `unsigned long`, and an allocator whose parameter is
+  // not size_t is not an allocator. `decltype(sizeof(0))` IS size_t on every
+  // target and needs nothing included.
+  const out = convert('void *operator new(unsigned int);\nint f() { return 0; }\n');
+  expect(out.state).toBe('converted');
+  if (out.state !== 'converted') return;
+  expect(out.text).toContain('operator new(decltype(sizeof(0)))');
+  expect(out.text).not.toContain('operator new(unsigned int)');
+});
+
+test('an unrelated `unsigned int` parameter is left alone', () => {
+  const out = convert('int f(unsigned int n) { return (int)n; }\n');
+  expect(out.state).toBe('converted');
+  if (out.state !== 'converted') return;
+  expect(out.text).toContain('f(unsigned int n)');
+});
+
+test('every rendered file carries the MSVC-spelling header', () => {
+  // `__int64` is named by one source and defined by nothing off Microsoft's
+  // compiler, so the rendering has to supply it the way it already supplies
+  // <string.h>.
+  const out = convert('int f() { return 0; }\n');
+  expect(out.state).toBe('converted');
+  if (out.state !== 'converted') return;
+  expect(out.text).toContain('#include "msvc.h"');
+});

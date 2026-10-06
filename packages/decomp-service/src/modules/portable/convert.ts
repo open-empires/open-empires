@@ -70,6 +70,78 @@ const ANY_ADDRESS_CAST = /\(\s*[\w:]+(?:\s*\*)+\s*\)\s*(0x[0-9a-fA-F]{6,8})/g;
 export const GLOBALS_BASE = 0x629000;
 export const GLOBALS_END = GLOBALS_BASE + 1554534;
 
+/**
+ * `operator new(unsigned int)` is the win32 declaration and the wrong type
+ * anywhere else.
+ *
+ * MSVC's `size_t` on win32 is `unsigned int`, so six proved sources declare
+ * the allocator that way and are right to. On wasm32 `size_t` is
+ * `unsigned long`, and a replacement allocator whose parameter is not
+ * `size_t` is not a replacement allocator -- clang rejects it outright, so
+ * six functions could not reach the browser build.
+ *
+ * `decltype(sizeof(0))` IS `size_t` by definition, on every target, and needs
+ * no header -- which matters because these files include only what the
+ * generator gives them.
+ */
+const OPERATOR_NEW_SIZE = /\b(operator\s+(?:new|delete)(?:\s*\[\s*\])?\s*\(\s*)unsigned\s+int\b/g;
+
+/**
+ * A bare out-of-line declaration of a member, which MSVC accepts and a
+ * conforming compiler does not.
+ *
+ * Five sources contain a line like `void S::g();` for a member already
+ * declared inside the struct. MSVC treats the repeat as harmless; clang
+ * requires an out-of-line declaration to BE a definition and refuses the
+ * whole file.
+ *
+ * The line is removed rather than given a body. A body would compile and
+ * would be a lie: `g()` does something in the original, and a silent no-op in
+ * a build meant to RUN is the worst of the three outcomes. Removing it leaves
+ * the call with no definition, which surfaces at LINK time as a named
+ * unresolved symbol -- the truthful report that this function has not been
+ * reconstructed yet, in the place that exists to say so.
+ *
+ * DONE BY BRACE DEPTH, NOT BY A GLOBAL REGEX. The shape of this declaration
+ * is also the shape of an ordinary qualified call statement: `A::B::f(1);` on
+ * a line of its own inside a function body matches a pattern written for
+ * `void S::g();` exactly, and a global replace would delete it -- silently,
+ * and in a build nobody can diff against anything. A computed deletion that
+ * takes more than it names has already cost this project 315 lines whose only
+ * symptom was one stray brace. So only lines at depth zero are considered,
+ * where a statement cannot occur.
+ */
+const OUT_OF_LINE_DECL = /^[ \t]*[\w:<>,*&][\w:<>,*&\t ]*?\b\w+::~?\w+[ \t]*\([^)]*\)[ \t]*(?:const[ \t]*)?;[ \t]*$/;
+
+/**
+ * Drop every file-scope out-of-line member declaration.
+ *
+ * Depth is counted from the braces seen so far, so a line is only eligible
+ * when nothing is open around it. Strings and character literals are not
+ * parsed: a brace inside one would miscount the depth, and the risk is
+ * accepted here deliberately rather than silently, because these sources are
+ * reconstructions of machine code and a brace inside a string literal has not
+ * occurred in any of 3,335 of them. If one ever does, this is the line to
+ * come back to.
+ */
+const dropOutOfLineDeclarations = (text: string): string => {
+  let depth = 0;
+  const kept: string[] = [];
+  for (const line of text.split('\n')) {
+    if (depth === 0 && OUT_OF_LINE_DECL.test(line)) {
+      // Opening and closing braces cannot both be absent and the line be a
+      // declaration, so nothing needs counting before dropping it.
+      continue;
+    }
+    kept.push(line);
+    for (const ch of line) {
+      if (ch === '{') depth += 1;
+      else if (ch === '}') depth = Math.max(0, depth - 1);
+    }
+  }
+  return kept.join('\n');
+};
+
 const GLOBALS_INCLUDE = '#include "gameimage.h"\n';
 
 /**
@@ -86,7 +158,7 @@ const GLOBALS_INCLUDE = '#include "gameimage.h"\n';
  * verification supplied, or it is a rendering of something that was never
  * proved.
  */
-const RUNTIME_INCLUDE = '#include <string.h>\n';
+const RUNTIME_INCLUDE = '#include <string.h>\n#include "msvc.h"\n';
 
 /**
  * `0x4e-4` is ONE preprocessing token, and an invalid one.
@@ -212,7 +284,11 @@ export const convert = (source: string): Conversion => {
     ? stripped.replace(ADDRESS_CAST, (whole, cast: string, addr: string) =>
         inModel(Number(addr)) ? `(${cast})GPTR(${addr})` : whole)
     : stripped;
-  const spaced = rewritten.replace(HEX_EXPONENT_TRAP, '$1 $2 ');
+  const spaced = dropOutOfLineDeclarations(
+    rewritten
+      .replace(HEX_EXPONENT_TRAP, '$1 $2 ')
+      .replace(OPERATOR_NEW_SIZE, '$1decltype(sizeof(0))'),
+  );
   const text =
     RUNTIME_INCLUDE + (needsGlobals ? GLOBALS_INCLUDE + spaced : spaced);
 

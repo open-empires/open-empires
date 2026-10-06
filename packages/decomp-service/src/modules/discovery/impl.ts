@@ -217,9 +217,30 @@ export class DiscoveryImpl
       deferred: [] as Array<{ va: number; bytes: number; reason: string; head: string }>,
     };
 
+    /**
+     * The spans between known functions, AND THE ONE AFTER THE LAST.
+     *
+     * The walk was `i + 1 < known.length`, which never looked past the final
+     * inventory entry -- so the single largest uncovered stretch in the
+     * executable was invisible to the scan that exists to find uncovered
+     * stretches. It is 30,541 bytes, from 0x620D30 to the end of `.text`, and
+     * it had never been counted, reported, or offered to a discovery rule.
+     *
+     * It was found by computing the same gaps outside the service and getting
+     * a figure 30,541 bytes larger, which is the only way an omission at the
+     * end of a loop ever shows up: every gap the scan DID report was correct,
+     * so nothing about its output looked wrong.
+     */
+    const spans: Array<{ lo: number; hi: number }> = [];
     for (let i = 0; i + 1 < known.length; i++) {
-      const gapLo = known[i]!.va + known[i]!.size;
-      const gapHi = known[i + 1]!.va;
+      spans.push({ lo: known[i]!.va + known[i]!.size, hi: known[i + 1]!.va });
+    }
+    const last = known[known.length - 1];
+    if (last !== undefined) spans.push({ lo: last.va + last.size, hi: img.textHi });
+
+    for (const span of spans) {
+      const gapLo = span.lo;
+      const gapHi = span.hi;
       if (gapHi <= gapLo) continue;
       report.gaps += 1;
 
@@ -297,6 +318,25 @@ export class DiscoveryImpl
         const size = extent.value;
         report.measured += 1;
         if (add) {
+          // COMPILER-GENERATED SPANS ARE MEASURED AND NOT RECORDED.
+          //
+          // The scan now covers the span after the last inventory entry, and
+          // that span -- 30,541 bytes to the end of `.text` -- is uniformly
+          // /GX unwind funclets. They have no source of their own: the
+          // compiler emits them from the enclosing function's try block, and
+          // they reappear by themselves once that function is right. Six
+          // agents transcribed 96 of them as naked assembly before this was
+          // understood, which inflates the numerator and the denominator with
+          // work that is not reconstruction, and all of it was deleted.
+          //
+          // So the test that already exists for this is applied here rather
+          // than a second one written: a span the decoder calls
+          // compiler-generated is counted in `measured` and never becomes an
+          // entry an agent can claim.
+          const generated = yield* this.dependencies.Disasm.compilerGenerated(img, [
+            { va: at, size },
+          ]);
+          if (generated.length > 0) continue;
           // `padding-aligned` when the span starts at a boundary this scan
           // found, which is the evidence that it is an entry at all.
           const evidence = k === 0 ? 'gap-residue' : 'padding-aligned';
