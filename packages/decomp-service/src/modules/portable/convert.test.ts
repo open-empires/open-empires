@@ -6,7 +6,7 @@
  * test rather than by a corpus run.
  */
 import { expect, test } from 'bun:test';
-import { convert, GLOBALS_BASE, GLOBALS_END } from './convert';
+import { convert, GLOBALS_BASE, GLOBALS_END, MSVC_HEADER } from './convert';
 
 const converted = (source: string) => {
   const out = convert(source);
@@ -254,4 +254,14 @@ test('an ordinary small case label is left alone', () => {
   expect(out.text).toContain('case 0x10:');
   expect(out.text).toContain('case 7:');
   expect(out.text).not.toContain('(int)0x10');
+});
+
+test('the MSVC header the tree carries defines __int64 as a macro', () => {
+  // A macro, not a typedef: `unsigned __int64` is what a source writes, and
+  // `unsigned` cannot be applied to a typedef name. Asserted here because the
+  // header is now embedded in this module and nothing else would catch a
+  // regression to a typedef -- which would move the failure rather than
+  // remove it, as it did once.
+  expect(MSVC_HEADER).toContain('#define __int64 long long');
+  expect(MSVC_HEADER).not.toContain('typedef long long __int64');
 });

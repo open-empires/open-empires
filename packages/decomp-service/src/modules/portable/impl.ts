@@ -7,7 +7,7 @@ import type { DbError, IDb } from '../db/interface';
 import { reconstructionsInForce } from '../db/reconstructions';
 import { rows } from '../db/rows';
 import { NoCurrentSubject } from '../subject/interface';
-import { convert, GAMEIMAGE_HEADER, PORT_HEADER } from './convert';
+import { convert, GAMEIMAGE_HEADER, MSVC_HEADER, PORT_HEADER } from './convert';
 import {
   PortWriteError,
   type IPortable,
@@ -140,6 +140,11 @@ export class PortableImpl
           // compiling it had never been tried. Written from the same
           // constants the rewrite used, so the two cannot drift.
           fs.writeFileSync(path.join(dir, 'gameimage.h'), GAMEIMAGE_HEADER);
+          // And the MSVC-spelling header, for the same reason: every rendered
+          // file includes it, so a tree without it is a tree that does not
+          // build. The audit happens to pass `-I platform`; a browser build
+          // will not.
+          fs.writeFileSync(path.join(dir, 'msvc.h'), MSVC_HEADER);
           // Stale generated files are removed, because a file left behind from
           // a source that no longer exists answers a question wrongly where a
           // missing one asks it.
