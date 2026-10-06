@@ -258,6 +258,28 @@ const routes = async (req: Request): Promise<Response> => {
                   Option.getOrUndefined(str(body.toolchain)),
                 ),
               );
+            // GET or POST; the agent id may come from the query string so
+            // this is answerable with a plain `curl` while an agent is mid-run.
+            case 'claims': {
+              const who = agentId !== '' ? agentId : (url.searchParams.get('agent') ?? '');
+              if (who === '') {
+                return {
+                  ok: false,
+                  error: 'name the agent: /api/work/claims?agent=<id>',
+                };
+              }
+              const held = yield* work.claims(who);
+              return {
+                agent: who,
+                held: held.length,
+                claims: held.map((c) => ({
+                  va: `0x${c.va.toString(16)}`,
+                  size: c.size,
+                  secondsLeft: c.secondsLeft,
+                  proven: c.proven,
+                })),
+              };
+            }
             case 'depth':
               return { depth: yield* work.queueDepth() };
             default:

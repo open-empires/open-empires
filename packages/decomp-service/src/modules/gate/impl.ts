@@ -1,6 +1,7 @@
 import { Effect, Option } from 'effect';
 import { acquireCompileSlot, releaseCompileSlot } from './throttle';
 import { implementing, type EffectGen } from 'effective-modules';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { modules } from '../index';
@@ -493,6 +494,7 @@ export class GateImpl extends implementing(modules.Gate) implements IGate {
           firstDiff: Option.none(),
           matchedAt: Option.none(),
           symbol: Option.none(),
+          emittedSha: Option.none(),
           detail: Option.some(compilation.diagnostic),
           toolchain,
         },
@@ -500,11 +502,18 @@ export class GateImpl extends implementing(modules.Gate) implements IGate {
       };
     }
 
-    const comparison = compareToSubject({
-      original: attempt.original,
-      functions: emittedFunctions(compilation.object),
-    });
+    const emitted = emittedFunctions(compilation.object);
+    const comparison = compareToSubject({ original: attempt.original, functions: emitted });
     const fragment = comparison.exact && Option.getOrElse(comparison.matchedAt, () => 0) > 0;
+    // Digest the function the verdict is ABOUT -- the one `comparison` named --
+    // not the whole object: an object can hold several functions, and a digest
+    // over all of them would differ whenever an unrelated neighbour changed.
+    const described = Option.flatMap(comparison.symbol, (name: string) =>
+      Option.fromNullishOr(emitted.find((f) => f.symbol === name)),
+    );
+    const emittedSha = Option.map(described, (f) =>
+      createHash('sha256').update(f.code).digest('hex'),
+    );
     return {
       verdict: {
         va: attempt.va,
@@ -520,6 +529,7 @@ export class GateImpl extends implementing(modules.Gate) implements IGate {
         firstDiff: comparison.firstDiff,
         matchedAt: comparison.matchedAt,
         symbol: comparison.symbol,
+        emittedSha,
         detail: fragment
           ? Option.some(
               'matched at a non-zero offset inside a larger emitted function, ' +

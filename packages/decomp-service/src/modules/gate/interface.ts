@@ -58,6 +58,13 @@ export const SWEEP_FLAG_SETS: ReadonlyArray<string> = [
   '/O2 /Oy- /GX /GR-', '/O2 /Os /GX /GR-', '/O2 /Ot /GX /GR-',
   '/O2 /Oi- /GX /GR-', '/O2 /Gy /GX /GR-', '/O2 /G5 /GX /GR-',
   '/O2 /G3 /GX /GR-', '/Od /GX /GR-', '/O2 /GX- /GR-',
+  // /G6 and /GB were absent, so "all fourteen flag sets eliminated" -- a
+  // sentence written about many functions in this project -- had never asked
+  // the Pentium-Pro question about any of them. /G6 schedules for the
+  // Pentium Pro and /GB is the "blended" default; a 1999 build could
+  // plausibly carry either, and the omission was invisible to every caller
+  // that trusted this list to be the whole space.
+  '/O2 /G6 /GX /GR-', '/O2 /GB /GX /GR-',
 ];
 
 /**
@@ -164,6 +171,23 @@ export interface Verdict {
   /** The emitted symbol the verdict describes: the one that matched, or the
    *  closest candidate when none did. */
   readonly symbol: Option.Option<string>;
+  /**
+   * sha256 of the emitted function's own bytes. `None` when nothing compiled.
+   *
+   * This exists so that "these two flag sets produce the same code" is a
+   * CHECKABLE claim rather than an inference. A sweep reports `emittedSize`
+   * and `firstDiff` per flag set, and a worker read eight of fourteen as
+   * "byte-identical" from those two numbers alone -- which they cannot
+   * establish, because two different codegens can agree on length and on the
+   * offset of their first difference from the subject and still differ from
+   * each other. The whole finding rested on it, and nothing in the report
+   * could confirm or refute it.
+   *
+   * A digest answers it exactly, costs one hash of a few hundred bytes, and
+   * needs no extra compile: the bytes are already in hand when the verdict is
+   * built.
+   */
+  readonly emittedSha: Option.Option<string>;
   /** The compiler's own diagnostic when it rejected the source, or the note
    *  explaining a weaker outcome. */
   readonly detail: Option.Option<string>;

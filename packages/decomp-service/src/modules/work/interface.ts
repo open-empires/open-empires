@@ -144,6 +144,13 @@ export interface SweepOutcome {
   readonly firstDiff: Option.Option<number>;
   readonly detail: Option.Option<string>;
   /**
+   * sha256 of the code this flag set emitted, so "these flag sets produce the
+   * same bytes" can be CHECKED across a sweep's outcomes instead of inferred
+   * from `emittedSize` and `firstDiff` -- which cannot establish it, and were
+   * read that way once for a finding that rested entirely on the claim.
+   */
+  readonly emittedSha: Option.Option<string>;
+  /**
    * These flags are not one the configuration names, so a match here is a
    * FINDING and not a pass.
    *
@@ -174,6 +181,20 @@ export interface SweepComparison {
   readonly relocatedOffsets: ReadonlyArray<number>;
 }
 
+/** One live lease, as its holder needs to see it. */
+export interface HeldClaim {
+  readonly va: number;
+  readonly size: number;
+  readonly claimedAt: number;
+  readonly expiresAt: number;
+  /** Seconds until the lease lapses and the work returns to the queue.
+   *  Negative would mean it already has, so such a claim is not reported. */
+  readonly secondsLeft: number;
+  /** True when a proof for this address already exists, which makes the claim
+   *  releasable rather than workable. */
+  readonly proven: boolean;
+}
+
 export interface SweepReport {
   readonly va: number;
   readonly size: number;
@@ -202,6 +223,17 @@ export interface IWork {
     leaseSeconds: number,
     vas?: ReadonlyArray<number>,
   ): EffectGen<ReadonlyArray<WorkItem>, WorkFailure>;
+
+  /**
+   * What this agent holds right now.
+   *
+   * The working protocol requires an agent's last action to be a gate run on
+   * every address it still holds, and until now nothing could tell it what
+   * those were: a worker had to read the database directly to confirm it had
+   * released everything, which is the one thing agents are told never to do.
+   * An obligation a caller cannot enumerate is an obligation it cannot meet.
+   */
+  claims(agentId: string): EffectGen<ReadonlyArray<HeldClaim>, WorkFailure>;
 
   /** Submit source for a claimed function. The service compiles it and
    *  returns the verdict; the agent never runs the compiler. */

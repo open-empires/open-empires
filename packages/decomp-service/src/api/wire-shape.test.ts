@@ -17,7 +17,7 @@
  */
 import { expect, test } from 'bun:test';
 import { Option, Schema } from 'effect';
-import { AgentsWire } from './wire';
+import { AgentsWire, SweepReportWire } from './wire';
 
 const encodeAgents = Schema.encodeUnknownSync(AgentsWire);
 
@@ -63,6 +63,74 @@ test('no agent field is an Option wrapper', () => {
   // is covered without anyone remembering to add a case.
   const row = one();
   for (const [name, value] of Object.entries(row)) {
+    const wrapped =
+      typeof value === 'object' && value !== null && '_tag' in (value as object);
+    expect(wrapped, `${name} arrived as an Option wrapper`).toBe(false);
+  }
+});
+
+/**
+ * A sweep's per-flag-set digest, which is what makes "these flag sets emit the
+ * same bytes" checkable.
+ *
+ * The claim that eight of fourteen flag sets gave byte-identical output was
+ * recorded from `emittedSize` and `firstDiff` alone, and those two numbers
+ * cannot establish it: two different codegens can agree on length and on the
+ * offset of their first difference from the subject while differing from each
+ * other. The digest is the field that settles it, so it has to reach the wire
+ * as a plain string -- read as an Option wrapper it would compare unequal for
+ * every pair and quietly invert the finding.
+ */
+const encodeSweepReport = Schema.encodeUnknownSync(SweepReportWire);
+
+const sweepOutcome = (over: Record<string, unknown> = {}) =>
+  (
+    encodeSweepReport({
+      va: 0x401000,
+      size: 16,
+      outcomes: [
+        {
+          flags: '/O2 /GX /GR-',
+          compiled: true,
+          exact: false,
+          matchedAtEntry: false,
+          emittedSize: Option.some(16),
+          masked: Option.some(0),
+          firstDiff: Option.some(4),
+          detail: Option.none(),
+          emittedSha: Option.some('a'.repeat(64)),
+          offConfiguration: false,
+          ...over,
+        },
+      ],
+      matched: [],
+      finding: false,
+    }) as { outcomes: ReadonlyArray<Record<string, unknown>> }
+  ).outcomes[0]!;
+
+test('a sweep outcome carries its emitted digest as a plain string', () => {
+  const o = sweepOutcome();
+  expect(o.emittedSha).toBe('a'.repeat(64));
+  expect(typeof o.emittedSha).toBe('string');
+});
+
+test('an outcome that compiled nothing reports a null digest, not a wrapper', () => {
+  const o = sweepOutcome({ compiled: false, emittedSha: Option.none(), emittedSize: Option.none() });
+  expect(o.emittedSha).toBeNull();
+});
+
+test('two outcomes are comparable for identical codegen by digest alone', () => {
+  // The property the finding needed and did not have: equal digests mean equal
+  // bytes, and equal size plus equal firstDiff does NOT.
+  const a = sweepOutcome({ emittedSha: Option.some('a'.repeat(64)) });
+  const b = sweepOutcome({ emittedSha: Option.some('b'.repeat(64)) });
+  expect(a.emittedSize).toBe(b.emittedSize);
+  expect(a.firstDiff).toBe(b.firstDiff);
+  expect(a.emittedSha).not.toBe(b.emittedSha);
+});
+
+test('no sweep outcome field is an Option wrapper', () => {
+  for (const [name, value] of Object.entries(sweepOutcome())) {
     const wrapped =
       typeof value === 'object' && value !== null && '_tag' in (value as object);
     expect(wrapped, `${name} arrived as an Option wrapper`).toBe(false);

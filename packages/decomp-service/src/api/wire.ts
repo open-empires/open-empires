@@ -91,6 +91,10 @@ export const SweepReportWire = Schema.Struct({
       masked: Schema.OptionFromNullOr(Schema.Number),
       firstDiff: Schema.OptionFromNullOr(Schema.Number),
       detail: Schema.OptionFromNullOr(Schema.String),
+      /** Digest of the code this flag set emitted, so a caller can tell which
+       *  flag sets produced the SAME bytes. `emittedSize` and `firstDiff`
+       *  cannot answer that, and were read as if they could. */
+      emittedSha: Schema.OptionFromNullOr(Schema.String),
       offConfiguration: Schema.Boolean,
     }),
   ),

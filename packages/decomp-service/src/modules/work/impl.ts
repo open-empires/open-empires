@@ -2,11 +2,12 @@ import { Effect, Option } from 'effect';
 import { implementing, type EffectGen } from 'effective-modules';
 import { modules } from '../index';
 import type { DbError } from '../db/interface';
-import { SUBJECT_FLAGS, SUBJECT_FLAGS_O1 } from '../gate/interface';
+import { SUBJECT_FLAGS, SUBJECT_FLAGS_O1, type EmittedCode } from '../gate/interface';
 import type { SubjectImage } from '../disasm/interface';
 import {
   MAX_SWEEP_FLAG_SETS, NoSubject, NotClaimed, UnknownFunction,
   ParkWithoutReason,
+  type HeldClaim,
   type IWork, type SubmitFailure, type SweepComparison, type SweepOutcome,
   type SweepReport,
   type Verdict, type WorkFailure, type WorkItem,
@@ -516,6 +517,38 @@ export class WorkImpl
     });
   }
 
+  *claims(agentId: string): EffectGen<ReadonlyArray<HeldClaim>, WorkFailure> {
+    const db = this.dependencies.Db;
+    const current = yield* this.dependencies.Subject.current();
+    if (Option.isNone(current)) {
+      return yield* Effect.fail(new NoSubject({ reason: 'no subject has been ingested' }));
+    }
+    const subjectSha = current.value.sha256;
+    const at = now();
+    const rows = (yield* db.all(
+      `SELECT c.va AS va, f.size AS size, c.claimed_at AS claimed_at,
+              c.expires_at AS expires_at,
+              EXISTS(SELECT 1 FROM proven p
+                      WHERE p.subject_sha = c.subject_sha AND p.va = c.va) AS proven
+         FROM claims c
+         JOIN functions f ON f.subject_sha = c.subject_sha AND f.va = c.va
+        WHERE c.subject_sha = ? AND c.agent_id = ?
+          AND c.released_at IS NULL AND c.expires_at > ?
+        ORDER BY f.size DESC`,
+      [subjectSha, agentId, at],
+    )) as ReadonlyArray<{
+      va: number; size: number; claimed_at: number; expires_at: number; proven: number;
+    }>;
+    return rows.map((r) => ({
+      va: r.va,
+      size: r.size,
+      claimedAt: r.claimed_at,
+      expiresAt: r.expires_at,
+      secondsLeft: Math.round(r.expires_at - at),
+      proven: r.proven === 1,
+    }));
+  }
+
   *sweep(
     agentId: string,
     va: number,
@@ -530,11 +563,19 @@ export class WorkImpl
     // same flag set asked twice costs another agent a submission.
     const sets = [...new Set(flagSets)].slice(0, MAX_SWEEP_FLAG_SETS);
     const outcomes: SweepOutcome[] = [];
+    /** What each flag set emitted, kept so the comparison needs no recompile. */
+    const entries = new Map<string, Option.Option<EmittedCode>>();
     for (const flags of sets) {
       // Sequential on purpose. A sweep is a diagnostic one agent asked for,
       // and letting it take the whole container in parallel would stall every
       // other agent's submissions behind it.
-      const v = yield* gate.check({ va, original, source, flags, toolchain: install });
+      // `contribute`, not `check`. `check` IS `contribute().verdict` -- it
+      // discards the emitted bytes and nothing else -- so asking for them
+      // here costs nothing, and keeping them is what removes the second
+      // compile that used to follow this loop.
+      const c = yield* gate.contribute({ va, original, source, flags, toolchain: install });
+      const v = c.verdict;
+      entries.set(flags, c.entry);
       outcomes.push({
         flags,
         compiled: v.compiled,
@@ -544,6 +585,7 @@ export class WorkImpl
         masked: Option.some(v.masked),
         firstDiff: v.firstDiff,
         detail: v.detail,
+        emittedSha: v.emittedSha,
         offConfiguration: flags !== SUBJECT_FLAGS && flags !== SUBJECT_FLAGS_O1,
       });
     }
@@ -563,9 +605,15 @@ export class WorkImpl
     // the whole time: `contribute` returns them and only the wire format
     // dropped them.
     //
-    // Only the best candidate is recompiled, not all fourteen: the container
-    // is shared and serialised, and the other thirteen listings would be
-    // answering a question nobody asked.
+    // NOTHING is recompiled here any more. This used to call `contribute` for
+    // the best candidate, which compiled the same source under the same flags
+    // a second time -- because the loop above called `check`, and `check` is
+    // `contribute().verdict`. The bytes had already been produced and thrown
+    // away. On one serialised container shared by every agent and by the
+    // composition proof, that was a wasted compile on every sweep.
+    //
+    // Only the best candidate's LISTING is rendered, which is cheap and local:
+    // the other thirteen would answer a question nobody asked.
     const best = outcomes
       .filter((o) => o.compiled)
       .sort(
@@ -576,11 +624,9 @@ export class WorkImpl
 
     let comparison: SweepComparison | undefined;
     if (best !== undefined) {
-      const contribution = yield* gate.contribute({
-        va, original, source, flags: best.flags, toolchain: install,
-      });
-      if (Option.isSome(contribution.entry)) {
-        const emitted = contribution.entry.value;
+      const stored = entries.get(best.flags) ?? Option.none();
+      if (Option.isSome(stored)) {
+        const emitted = stored.value;
         const disasm = this.dependencies.Disasm;
         comparison = {
           flags: best.flags,
