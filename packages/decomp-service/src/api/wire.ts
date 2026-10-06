@@ -130,6 +130,11 @@ export const SweepReportWire = Schema.Struct({
     Schema.Struct({
       flags: Schema.String,
       firstDiff: Schema.OptionFromNullOr(Schema.Number),
+      /** Every differing offset, relocations already excused, and the count.
+       *  `firstDiff` alone has twice reported no progress while almost
+       *  everything behind it was being fixed. */
+      differingOffsets: Schema.Array(Schema.Number),
+      differingBytes: Schema.Number,
       emittedBytes: Schema.String,
       emittedListing: Schema.String,
       subjectListing: Schema.String,

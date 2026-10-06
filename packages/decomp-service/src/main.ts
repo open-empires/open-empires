@@ -249,6 +249,28 @@ const routes = async (req: Request): Promise<Response> => {
             // the same live lease `submit` does, and it writes nothing: a hit
             // under flags the configuration does not name is a finding for a
             // person, not a verdict.
+            // Every parked function in a class, with what its author ruled
+            // out. Two workers read `near_misses` straight out of the
+            // database in one day for want of this.
+            case 'parked': {
+              const klass = str(body.class ?? (url.searchParams.get('class') ?? ''));
+              const want = Number(
+                body.limit ?? url.searchParams.get('limit') ?? 25,
+              );
+              const records = yield* work.parked(klass, Number.isFinite(want) ? want : 25);
+              return {
+                class: Option.getOrNull(klass),
+                parked: records.length,
+                records: records.map((r) => ({
+                  va: `0x${r.va.toString(16)}`,
+                  size: r.size,
+                  blockedClass: Option.getOrNull(r.blockedClass),
+                  eliminated: Option.getOrNull(r.eliminated),
+                  note: Option.getOrNull(r.note),
+                  claimed: r.claimed,
+                })),
+              };
+            }
             // MANY SOURCES, ONE FLAG SET -- the mirror of `sweep`, and the
             // call a structural question actually needs. Two workers reported
             // that one HTTP round trip per source spelling, not the

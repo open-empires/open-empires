@@ -206,6 +206,28 @@ export interface SweepComparison {
   /** Offsets the LINKER fills. A difference at one of these is not a
    *  difference in the reconstruction. */
   readonly relocatedOffsets: ReadonlyArray<number>;
+  /**
+   * EVERY offset that differs, with the relocation fields already excused.
+   *
+   * `firstDiff` alone is actively misleading and has cost whole rounds. One
+   * function read `firstDiff 14` both before and after a fix that took its
+   * true count of differing bytes from 17 to 1: the first difference stayed
+   * where it was while almost everything behind it was repaired, so the only
+   * number the caller had said nothing had happened. Another was abandoned
+   * twice because a 3,942-byte function diverged at offset 52 -- the low byte
+   * of a branch displacement near the front -- and nothing reported that the
+   * remaining 3,890 bytes were already right.
+   *
+   * Computed here because the gate holds both byte arrays and the relocation
+   * set at the moment of comparison, and every worker was otherwise
+   * re-implementing this from `emittedBytes` and the two listings. Several did
+   * it differently.
+   */
+  readonly differingOffsets: ReadonlyArray<number>;
+  /** How many bytes differ, which is the figure to watch across attempts.
+   *  Carried beside the list so a caller can see progress without parsing
+   *  it. */
+  readonly differingBytes: number;
 }
 
 /**
@@ -230,6 +252,21 @@ export interface Claimability {
   /** Who holds it, when the reason is `held-by-another`. */
   readonly heldBy: Option.Option<string>;
   readonly secondsLeft: Option.Option<number>;
+}
+
+/** A parked function and the reasoning that parked it. */
+export interface ParkedRecord {
+  readonly va: number;
+  readonly size: number;
+  readonly blockedClass: Option.Option<string>;
+  /** What the author ruled out, verbatim. The reason a second pass is cheaper
+   *  than a first. */
+  readonly eliminated: Option.Option<string>;
+  readonly note: Option.Option<string>;
+  readonly updatedAt: number;
+  /** True while someone holds it, so a reader does not start on work in
+   *  flight. */
+  readonly claimed: boolean;
 }
 
 /** One live lease, as its holder needs to see it. */
@@ -319,6 +356,26 @@ export interface IWork {
     leaseSeconds: number,
     vas?: ReadonlyArray<number>,
   ): EffectGen<ReadonlyArray<WorkItem>, WorkFailure>;
+
+  /**
+   * Every parked function, or every one in a named class, with what its
+   * author ruled out.
+   *
+   * The `eliminated` text is the most valuable thing a second pass has --
+   * every function above 1,024 bytes that has been proved closed on a second
+   * pass over an earlier worker's written reading -- and a claim returned it
+   * only for addresses the caller held. To read the other members of its own
+   * class, a worker had to query `near_misses` directly, which is the one
+   * thing agents are told never to do, and two of them did it in one day.
+   *
+   * `klass` matches a substring, because the classes are sentences written by
+   * whoever parked the function and nobody can be expected to reproduce one
+   * exactly.
+   */
+  parked(
+    klass: Option.Option<string>,
+    limit: number,
+  ): EffectGen<ReadonlyArray<ParkedRecord>, WorkFailure>;
 
   /**
    * Compile MANY SOURCES under ONE flag set, and group them by the bytes they

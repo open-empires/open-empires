@@ -7,7 +7,8 @@ import type { SubjectImage } from '../disasm/interface';
 import {
   MAX_PROBE_SOURCES, MAX_SWEEP_FLAG_SETS, NoSubject, NotClaimed, UnknownFunction,
   ParkWithoutReason,
-  type Claimability, type HeldClaim, type ProbeOutcome, type ProbeReport,
+  type Claimability, type HeldClaim, type ParkedRecord,
+  type ProbeOutcome, type ProbeReport,
   type IWork, type SubmitFailure, type SweepComparison, type SweepOutcome,
   type SweepReport,
   type Verdict, type WorkFailure, type WorkItem,
@@ -553,6 +554,41 @@ export class WorkImpl
     });
   }
 
+  *parked(
+    klass: Option.Option<string>,
+    limit: number,
+  ): EffectGen<ReadonlyArray<ParkedRecord>, WorkFailure> {
+    const db = this.dependencies.Db;
+    const at = now();
+    const like = Option.getOrElse(klass, () => '');
+    const rows = (yield* db.all(
+      `SELECT n.va AS va, f.size AS size, n.blocked_class AS blocked_class,
+              n.eliminated AS eliminated, n.note AS note, n.updated_at AS updated_at,
+              EXISTS(SELECT 1 FROM claims c
+                      WHERE c.subject_sha = n.subject_sha AND c.va = n.va
+                        AND c.released_at IS NULL AND c.expires_at > ?) AS claimed
+         FROM near_misses n
+         JOIN current_config cfg ON cfg.only_row = 1 AND cfg.subject_sha = n.subject_sha
+         JOIN functions f ON f.subject_sha = n.subject_sha AND f.va = n.va
+        WHERE (? = '' OR n.blocked_class LIKE '%' || ? || '%')
+        ORDER BY f.size DESC
+        LIMIT ?`,
+      [at, like, like, Math.min(200, Math.max(1, limit))],
+    )) as ReadonlyArray<{
+      va: number; size: number; blocked_class: string | null;
+      eliminated: string | null; note: string | null; updated_at: number; claimed: number;
+    }>;
+    return rows.map((r) => ({
+      va: r.va,
+      size: r.size,
+      blockedClass: Option.fromNullishOr(r.blocked_class),
+      eliminated: Option.fromNullishOr(r.eliminated),
+      note: Option.fromNullishOr(r.note),
+      updatedAt: r.updated_at,
+      claimed: r.claimed === 1,
+    }));
+  }
+
   *probe(
     agentId: string,
     va: number,
@@ -868,6 +904,25 @@ export class WorkImpl
           // The linker fills these, so a difference at one of them is not a
           // difference in the reconstruction.
           relocatedOffsets: [...emitted.relocated].sort((a, b) => a - b),
+          // Compared over the SUBJECT's length, which is what the function
+          // occupies; the emitted section is padded to its alignment and a
+          // switch's tables sit after its code, so comparing the longer of
+          // the two would report padding as a difference.
+          ...(() => {
+            const n = Math.min(original.length, emitted.bytes.length);
+            const differing: number[] = [];
+            for (let k = 0; k < n; k += 1) {
+              if (emitted.relocated.has(k)) continue;
+              if (emitted.bytes[k] !== original[k]) differing.push(k);
+            }
+            // A length disagreement is a real difference and must not vanish
+            // because the loop stopped at the shorter array. Every byte the
+            // subject has beyond what was emitted is missing, and counts.
+            for (let k = n; k < original.length; k += 1) {
+              if (!emitted.relocated.has(k)) differing.push(k);
+            }
+            return { differingOffsets: differing, differingBytes: differing.length };
+          })(),
         };
       }
     }
