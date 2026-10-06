@@ -8,7 +8,7 @@ import {
   MAX_PROBE_SOURCES, MAX_SWEEP_FLAG_SETS, PROBE_CONCURRENCY, NoSubject, NotClaimed, NotStored,
   UnknownFunction,
   ParkWithoutReason,
-  type Claimability, type HeldClaim, type ParkedRecord,
+  type BandCandidate, type Claimability, type HeldClaim, type ParkedRecord,
   type ProbeOutcome, type ProbeReport,
   type IWork, type SubmitFailure, type SweepComparison, type SweepOutcome,
   type SweepReport,
@@ -218,33 +218,63 @@ export class WorkImpl
        -- The ceiling is unchanged -- it still ratchets, and it still keeps a
        -- 13,791-byte function away from the first caller -- this only decides
        -- what is served underneath it.
-       -- THEN by whether the function can be finished, which is measured.
+       -- BY WHETHER IT CAN BE FINISHED, THEN by where the bytes are.
        --
-       -- Band order is about where the bytes are. It says nothing about
-       -- whether a function can be closed, and that was measured separately
-       -- across every unsolved function: x87 appears in 1,054 of them holding
-       -- 38.6% of the remaining bytes, jump tables in 376 holding 18.9%, and
-       -- vetoing both and taking branch density under 5% leaves 684 functions
-       -- and 202,378 bytes -- which is the set every recent close came from.
+       -- These two keys were the other way round for about three hours, and
+       -- the band came first: 512-4095, then 128-511, then the big band, then
+       -- the stubs. The reasoning was that 56.8% of the remaining bytes are
+       -- in 512-4095. That is still true and it is no longer the right key,
+       -- because a worker measured what is actually CLOSABLE in each band
+       -- after a round that proved 38 functions:
        --
-       -- Five closes in a week were at 0.6% to 2.3% branch density; every
-       -- candidate a worker read and declined was 6-16%. So branch density
-       -- orders, and x87 and a jump table push to the back rather than being
-       -- excluded: a vetoed function is still work, it is just work nobody
-       -- should be handed before the 684.
+       --     band        closable   bytes    all remaining
+       --     <128             445  23,847           70,042
+       --     128-511          154  33,954          513,971
+       --     512-2047           1     532          713,455
+       --     2048+              0       0          388,615
        --
-       -- A LEFT JOIN, and unmeasured sorts with the good ones rather than
-       -- behind them. The measurement is filled by a background job, so a
-       -- newly discovered function has no row for a while, and burying it
-       -- until the job catches up would hide exactly the entries discovery
-       -- just worked to find.
+       -- "Closable" is no veto and at most two branches -- the screen that
+       -- closed 33 of those 38 on their FIRST probe. The 512-2047 band's
+       -- supply of it is exhausted: ONE function. So a band-first order sends
+       -- every worker into hard-class work that has yielded one or two proofs
+       -- a round all month, while 599 first-probe functions sit behind it.
+       --
+       -- So closability is the FIRST key and the band is the second. Within
+       -- the closable tier the band order then serves the single 512-2047
+       -- function, then the 154 in 128-511, then the 445 stubs -- which is
+       -- the order the worker recommended, and it also happens to be
+       -- descending by average size (220 bytes against 54).
+       --
+       -- The band key still decides everything NOT closable, because once the
+       -- easy surface is gone the bytes are the only guide left and they are
+       -- in 512-4095.
+       --
+       -- UNMEASURED SORTS IN THE MIDDLE, which took two attempts to get
+       -- right. It first sorted WITH the closable, on the reasoning that the
+       -- measurement is filled by a background job and burying a newly
+       -- discovered function would hide what discovery just worked to find.
+       -- The effect was the opposite of the intent: a worker claiming three
+       -- was handed 2,459, 2,452 and 2,153-byte functions, all unscreened and
+       -- all in the band with ZERO closable members, ahead of 599 functions
+       -- measured as first-probe candidates. Twelve unmeasured rows
+       -- outranked the entire easy surface.
+       --
+       -- So: measured-closable, then unmeasured, then measured-hard, then
+       -- vetoed. Discovery's finds are not buried and do not displace the
+       -- best work either, and they stay in the middle for one tick of the
+       -- closability job at most.
        ORDER BY CASE
+                  WHEN COALESCE(k.x87, 0) = 1 OR COALESCE(k.jump_table, 0) = 1 THEN 3
+                  WHEN k.branches IS NULL THEN 1
+                  WHEN k.branches <= 2 THEN 0
+                  ELSE 2
+                END,
+                CASE
                   WHEN f.size BETWEEN 512 AND 4095 THEN 0
                   WHEN f.size BETWEEN 128 AND 511  THEN 1
                   WHEN f.size >= 4096              THEN 2
                   ELSE 3
                 END,
-                COALESCE(k.x87, 0) + COALESCE(k.jump_table, 0),
                 CASE WHEN k.instructions IS NULL OR k.instructions = 0 THEN 0
                      ELSE CAST(k.branches AS REAL) / k.instructions END,
                 f.size DESC
@@ -883,6 +913,58 @@ export class WorkImpl
         .map(([emittedSha, indices]) => ({ emittedSha, indices }))
         .sort((a, b) => b.indices.length - a.indices.length),
     };
+  }
+
+  *band(filter: {
+    readonly min: number;
+    readonly max: number;
+    readonly maxBranches: number;
+    readonly allowX87: boolean;
+    readonly allowJumpTable: boolean;
+    readonly limit: number;
+  }): EffectGen<ReadonlyArray<BandCandidate>, WorkFailure> {
+    const db = this.dependencies.Db;
+    const at = now();
+    const rows = (yield* db.all(
+      `SELECT f.va AS va, f.size AS size,
+              k.instructions AS instructions, k.branches AS branches,
+              k.x87 AS x87, k.jump_table AS jump_table,
+              EXISTS(SELECT 1 FROM near_misses n
+                      WHERE n.subject_sha = f.subject_sha AND n.va = f.va) AS parked,
+              EXISTS(SELECT 1 FROM claims cl
+                      WHERE cl.subject_sha = f.subject_sha AND cl.va = f.va
+                        AND cl.released_at IS NULL AND cl.expires_at > ?) AS claimed
+         FROM functions f
+         JOIN current_config c ON c.only_row = 1 AND c.subject_sha = f.subject_sha
+         JOIN function_closability k
+           ON k.subject_sha = f.subject_sha AND k.va = f.va AND k.size = f.size
+        WHERE f.size BETWEEN ? AND ?
+          AND NOT EXISTS (SELECT 1 FROM proven p
+                           WHERE p.subject_sha = f.subject_sha AND p.va = f.va)
+          AND k.branches <= ?
+          AND (? = 1 OR k.x87 = 0)
+          AND (? = 1 OR k.jump_table = 0)
+        ORDER BY f.size DESC
+        LIMIT ?`,
+      [
+        at, filter.min, filter.max, filter.maxBranches,
+        filter.allowX87 ? 1 : 0, filter.allowJumpTable ? 1 : 0,
+        Math.min(500, Math.max(1, filter.limit)),
+      ],
+    )) as ReadonlyArray<{
+      va: number; size: number; instructions: number; branches: number;
+      x87: number; jump_table: number; parked: number; claimed: number;
+    }>;
+    return rows.map((r) => ({
+      va: r.va,
+      size: r.size,
+      instructions: r.instructions,
+      branches: r.branches,
+      x87: r.x87 === 1,
+      jumpTable: r.jump_table === 1,
+      parked: r.parked === 1,
+      claimed: r.claimed === 1,
+    }));
   }
 
   *measureClosability(limit: number): EffectGen<

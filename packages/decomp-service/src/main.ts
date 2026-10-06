@@ -379,6 +379,45 @@ const routes = async (req: Request): Promise<Response> => {
                   Option.getOrUndefined(str(body.toolchain)),
                 ),
               );
+            // SCREEN A BAND IN ONE CALL.
+            //
+            // `function_closability` holds instructions, branches, x87 and
+            // jump_table for all 7,408 functions and had no endpoint, so the
+            // screening step the guide recommends could only be done by hand:
+            // one worker spent twelve minutes and 411 `/api/disasm` GETs
+            // rebuilding exactly this table, and another read it out of the
+            // database read-only -- the one thing agents are told not to do.
+            case 'band': {
+              const n = (k: string, d: number) => {
+                const v = Number(url.searchParams.get(k) ?? (body as Record<string, unknown>)[k]);
+                return Number.isFinite(v) ? v : d;
+              };
+              const found = yield* work.band({
+                min: n('min', 128),
+                max: n('max', 511),
+                maxBranches: n('maxBranches', 2),
+                allowX87: url.searchParams.get('allowX87') === 'true',
+                allowJumpTable: url.searchParams.get('allowJumpTable') === 'true',
+                limit: n('limit', 50),
+              });
+              return {
+                matched: found.length,
+                functions: found.map((f) => ({
+                  va: `0x${f.va.toString(16)}`,
+                  size: f.size,
+                  instructions: f.instructions,
+                  branches: f.branches,
+                  branchPct:
+                    f.instructions > 0
+                      ? Math.round((1000 * f.branches) / f.instructions) / 10
+                      : null,
+                  x87: f.x87,
+                  jumpTable: f.jumpTable,
+                  parked: f.parked,
+                  claimed: f.claimed,
+                })),
+              };
+            }
             // Why each named address can or cannot be claimed. `claim` with
             // explicit addresses returns fewer rows without saying which were
             // refused or why, and "someone else holds it" and "it is already

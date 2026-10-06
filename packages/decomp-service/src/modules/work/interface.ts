@@ -329,6 +329,21 @@ export interface Claimability {
   readonly secondsLeft: Option.Option<number>;
 }
 
+/** One unproven function and the shape facts a worker screens it on. */
+export interface BandCandidate {
+  readonly va: number;
+  readonly size: number;
+  readonly instructions: number;
+  readonly branches: number;
+  readonly x87: boolean;
+  readonly jumpTable: boolean;
+  /** Parked functions are included and flagged: a second pass over a parked
+   *  reading is how every large function here has been proved, so hiding them
+   *  would hide the work most likely to close. */
+  readonly parked: boolean;
+  readonly claimed: boolean;
+}
+
 /** A parked function and the reasoning that parked it. */
 export interface ParkedRecord {
   readonly va: number;
@@ -528,6 +543,33 @@ export interface IWork {
     flags: string,
     install?: string,
   ): EffectGen<ProbeReport, SubmitFailure>;
+
+  /**
+   * Unproven functions in a size range, screened by the shape facts that
+   * predict whether they can be finished.
+   *
+   * `function_closability` has held instructions, branches, x87 and
+   * jump_table for every function since it was added and had no endpoint, so
+   * the screening step the guide recommends could only be done by hand: one
+   * worker spent twelve minutes and 411 `/api/disasm` GETs rebuilding this
+   * table, and another read it out of the database read-only -- the one thing
+   * agents are told not to do. A capability nobody can reach is a capability
+   * nobody has.
+   *
+   * It is worth reaching now because the easy surface has moved. After a
+   * round that proved 38 functions, the screen that closed 33 of them on
+   * their first probe leaves 445 candidates under 128 bytes, 154 in 128-511,
+   * ONE in 512-2047 and none above -- so which band a worker takes is now a
+   * decision, and it needs the numbers to make it.
+   */
+  band(filter: {
+    readonly min: number;
+    readonly max: number;
+    readonly maxBranches: number;
+    readonly allowX87: boolean;
+    readonly allowJumpTable: boolean;
+    readonly limit: number;
+  }): EffectGen<ReadonlyArray<BandCandidate>, WorkFailure>;
 
   /**
    * Measure the shape facts that decide what the queue hands out, for every
