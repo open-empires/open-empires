@@ -1089,7 +1089,7 @@ const supervise = () => {
   // So it is measured here, incrementally, and a function whose recorded
   // extent has since been corrected is re-measured because the old number was
   // about different bytes. 500 at a time keeps any single pass short.
-  every('closability', 600, async () => {
+  every('closability', 180, async () => {
     const r = await Effect.runPromise(
       provided(
         Effect.gen(function* () {

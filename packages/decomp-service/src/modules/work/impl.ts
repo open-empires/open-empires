@@ -762,22 +762,32 @@ export class WorkImpl
     const sha = img.sha256;
     const want = Math.min(2000, Math.max(1, limit));
 
-    // Unsolved, and either never measured or measured against a size that has
-    // since been corrected.
+    // Never measured, or measured against a size that has since been
+    // corrected. UNSOLVED FIRST, because that is what the queue orders by --
+    // but proven functions are measured too, and the reason is not symmetry.
+    //
+    // This proxy now decides what every agent is handed, and the only way to
+    // refine it is to correlate it against what actually closed. Measuring
+    // only the unsolved set makes that impossible by construction: a function
+    // loses its row the moment it is proved, so the outcomes are exactly the
+    // rows that do not exist. Two functions closed on the FIRST compile at 0%
+    // branch density within three minutes of this ordering going live, and
+    // that could only be checked because they happened to be measured while
+    // still unsolved.
     const todo = (yield* db.all(
-      `SELECT f.va AS va, f.size AS size
+      `SELECT f.va AS va, f.size AS size,
+              EXISTS (SELECT 1 FROM proven p
+                       WHERE p.subject_sha = f.subject_sha AND p.va = f.va) AS solved
          FROM functions f
          JOIN current_config c ON c.only_row = 1 AND c.subject_sha = f.subject_sha
         WHERE f.size > 0
-          AND NOT EXISTS (SELECT 1 FROM proven p
-                           WHERE p.subject_sha = f.subject_sha AND p.va = f.va)
           AND NOT EXISTS (SELECT 1 FROM function_closability k
                            WHERE k.subject_sha = f.subject_sha AND k.va = f.va
                              AND k.size = f.size)
-        ORDER BY f.size DESC
+        ORDER BY solved ASC, f.size DESC
         LIMIT ?`,
       [want],
-    )) as ReadonlyArray<{ va: number; size: number }>;
+    )) as ReadonlyArray<{ va: number; size: number; solved: number }>;
 
     if (todo.length === 0) return { measured: 0, vetoed: 0, remaining: 0 };
 
@@ -808,8 +818,6 @@ export class WorkImpl
       `SELECT COUNT(*) AS n FROM functions f
          JOIN current_config c ON c.only_row = 1 AND c.subject_sha = f.subject_sha
         WHERE f.size > 0
-          AND NOT EXISTS (SELECT 1 FROM proven p
-                           WHERE p.subject_sha = f.subject_sha AND p.va = f.va)
           AND NOT EXISTS (SELECT 1 FROM function_closability k
                            WHERE k.subject_sha = f.subject_sha AND k.va = f.va
                              AND k.size = f.size)`,
