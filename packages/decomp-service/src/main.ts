@@ -209,10 +209,52 @@ const routes = async (req: Request): Promise<Response> => {
       return Number.isFinite(n) ? n : Number.NaN;
     };
     const badVa = (v: unknown): boolean => !Number.isFinite(num(v));
+
+    /**
+     * A flag set, or a refusal. NEVER a silently different build.
+     *
+     * `flagSets.map(String)` accepted a NESTED array -- `[["/O2","/GX","/GR-"]]`
+     * -- and stringified it to `"/O2,/GX,/GR-"`, which cl.exe does not
+     * understand as three options. It compiled anyway, with something else,
+     * and returned a listing for that something else.
+     *
+     * Two workers hit it independently and both drew a false conclusion from
+     * the result: each read a listing with no EH frame and concluded a
+     * destructor emitted none. One spent a probe round hunting a frame that
+     * was never missing. A verdict about the wrong build is worse than no
+     * verdict, because it looks like an answer.
+     *
+     * A real MSVC flag string is space-separated tokens, each beginning with
+     * `/` or `-`. That is the whole test; it is not a whitelist, because a
+     * sweep exists to explore flags nobody has tried.
+     */
+    const badFlagSet = (f: unknown): boolean => {
+      if (typeof f !== 'string') return true;
+      const tokens = f.trim().split(/\s+/).filter((t) => t !== '');
+      if (tokens.length === 0) return true;
+      return tokens.some((t) => !t.startsWith('/') && !t.startsWith('-'));
+    };
     // One guard for every action that names an address, rather than each one
     // discovering NaN for itself. A malformed address used to reach the
     // query and come back as a statement about the CLAIM ("you hold no live
     // claim on 0xNaN") instead of about the request.
+    if (Array.isArray(body.flagSets)) {
+      const bad = body.flagSets.filter(badFlagSet);
+      if (bad.length > 0) {
+        return json(
+          {
+            ok: false,
+            error:
+              `${bad.length} of ${body.flagSets.length} flag set(s) are not flag strings: ` +
+              `${JSON.stringify(bad.slice(0, 3))}. Each entry is ONE string of ` +
+              `space-separated options, e.g. "/O2 /GX /GR-" -- a nested array ` +
+              `stringifies to "/O2,/GX,/GR-", which this compiler does not ` +
+              `understand and used to build something else instead.`,
+          },
+          400,
+        );
+      }
+    }
     const vaActions = new Set(['submit', 'amend', 'sweep', 'probe', 'park', 'release']);
     if (seg[2] !== undefined && vaActions.has(seg[2]) && badVa(body.va)) {
       return json(
