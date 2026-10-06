@@ -399,6 +399,128 @@ const routes = async (req: Request): Promise<Response> => {
     );
   }
 
+  // /api/disasm/0x4e6ce0?bytes=64   disassemble ANY address
+  //
+  // There was no way to ask. An agent correcting a misaligned inventory entry
+  // had to reach for an outside disassembler to establish that 0x50241E is
+  // the second byte of a `call dword ptr [edx+0x16c]` beginning at 0x50241D --
+  // a question the service answers for a claimed function and refused to
+  // answer for an address. Correcting the inventory is exactly the work that
+  // happens OUTSIDE a claim.
+  if (seg[0] === 'api' && seg[1] === 'disasm' && seg.length === 3) {
+    return handle(
+      provided(
+        Effect.gen(function* () {
+          const raw = seg[2] as string;
+          const va = Number.parseInt(raw, raw.startsWith('0x') ? 16 : 10);
+          if (!Number.isFinite(va)) {
+            return { ok: false, error: `${raw} is not an address` };
+          }
+          const asked = Number(url.searchParams.get('bytes') ?? 64);
+          const length = Math.min(Math.max(Number.isFinite(asked) ? asked : 64, 1), 4096);
+          const subject = yield* modules.Subject;
+          const current = yield* subject.current();
+          if (Option.isNone(current)) {
+            return { ok: false, error: 'no subject has been ingested' };
+          }
+          const s = current.value;
+          const img = {
+            sha256: s.sha256,
+            bytes: yield* subject.imageBytes(),
+            imageBase: s.imageBase,
+            textLo: s.textLo,
+            textHi: s.textHi,
+          };
+          const off = va - img.imageBase;
+          if (off < 0 || off + length > img.bytes.length) {
+            return {
+              ok: false,
+              error:
+                `0x${va.toString(16)} + ${length} is outside the image ` +
+                `(${`0x${img.imageBase.toString(16)}`}..` +
+                `0x${(img.imageBase + img.bytes.length).toString(16)})`,
+            };
+          }
+          const listing = yield* (yield* modules.Disasm).listingOfBytes(
+            img.bytes.subarray(off, off + length),
+            va,
+            `0x${va.toString(16)}`,
+          );
+          // What the inventory believes about this address, which is the
+          // other half of the question when an entry looks misaligned.
+          const db = yield* modules.Db;
+          const covering = yield* db.one(
+            `SELECT va, size FROM functions
+              WHERE ? >= va AND ? < va + size ORDER BY va DESC LIMIT 1`,
+            [va, va],
+          );
+          const c = covering as { va: number; size: number } | null;
+          return {
+            va: `0x${va.toString(16)}`,
+            bytes: length,
+            listing,
+            insideKnownFunction:
+              c === null
+                ? null
+                : {
+                    va: `0x${c.va.toString(16)}`,
+                    size: c.size,
+                    offset: va - c.va,
+                    isEntry: va === c.va,
+                  },
+          };
+        }),
+      ) as Effect.Effect<unknown, { readonly _tag: string }, never>,
+    );
+  }
+
+  // /api/imports/0x6353dc   what the service knows about one import slot
+  //
+  // An agent reported this slot unnamed while the service held
+  // `WINMM.dll!timeGetTime` for it, because there was no way to ask about one
+  // slot: the name report covers the redirected libraries and the JSON on
+  // disk is stale. A fact nobody can look up is a fact nobody has.
+  if (seg[0] === 'api' && seg[1] === 'imports' && seg.length === 3) {
+    return handle(
+      provided(
+        Effect.gen(function* () {
+          const raw = seg[2] as string;
+          const slot = Number.parseInt(raw, raw.startsWith('0x') ? 16 : 10);
+          if (!Number.isFinite(slot)) {
+            return { ok: false, error: `${raw} is not a slot address` };
+          }
+          const db = yield* modules.Db;
+          const row = (yield* db.one(
+            `SELECT dll, name, resolution, blocked_by FROM import_slots WHERE slot = ?`,
+            [slot],
+          )) as Record<string, unknown> | null;
+          if (row === null) {
+            return { ok: false, error: `0x${slot.toString(16)} is not an import slot` };
+          }
+          const dead = yield* db.one(
+            'SELECT reason FROM unreferenced_import_slots WHERE slot = ?',
+            [slot],
+          );
+          return {
+            slot: `0x${slot.toString(16)}`,
+            dll: row.dll,
+            name: row.name,
+            resolution: row.resolution,
+            blockedBy: row.blocked_by,
+            // A slot nothing calls needs no implementation.
+            unreferenced: dead === null ? null : (dead as { reason: string }).reason,
+            // The unit that matters: one slot can serve several APIs.
+            callSites: yield* db.all(
+              `SELECT call_site, api, evidence FROM import_bindings
+                WHERE slot = ? ORDER BY call_site`,
+              [slot],
+            ),
+          };
+        }),
+      ) as Effect.Effect<unknown, { readonly _tag: string }, never>,
+    );
+  }
+
   // /api/discovery              how the inventory is growing, and from what
   // /api/discovery/expand       harvest entries from every proven function
   // /api/discovery/remeasure    check recorded sizes against the bytes
@@ -562,6 +684,41 @@ const routes = async (req: Request): Promise<Response> => {
                 repaired: u.repaired,
                 covered: u.covered,
               })),
+            };
+          }
+
+          // An entry an agent established by reading the bytes. Checked, not
+          // trusted: it must decode, it must measure, and it must not sit
+          // inside a function that has a proof.
+          if (seg[2] === 'entry') {
+            const entries = Array.isArray(body.entries)
+              ? body.entries.flatMap((e) => {
+                  const o = e as { va?: unknown; evidence?: unknown };
+                  return typeof o.va === 'number' && typeof o.evidence === 'string'
+                    ? [{ va: o.va, evidence: o.evidence }]
+                    : [];
+                })
+              : [];
+            if (entries.length === 0) {
+              return {
+                ok: false,
+                error: 'body.entries must hold { va: number, evidence: string } objects',
+              };
+            }
+            const outcomes = yield* d.recordEntry(entries);
+            return {
+              accepted: outcomes
+                .filter((o) => o.accepted)
+                .map((o) => ({
+                  va: `0x${o.va.toString(16)}`,
+                  size: Option.getOrNull(o.size),
+                })),
+              refused: outcomes
+                .filter((o) => !o.accepted)
+                .map((o) => ({
+                  va: `0x${o.va.toString(16)}`,
+                  because: Option.getOrNull(o.refusedBecause),
+                })),
             };
           }
 

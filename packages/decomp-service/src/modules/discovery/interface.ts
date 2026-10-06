@@ -266,6 +266,28 @@ export interface IDiscovery {
   auditWorkability(repair: boolean):
     EffectGen<WorkabilityAudit, DbError | DisasmError | SubjectIoError | SubjectParseError | DiscoveryFailed>;
 
+  /**
+   * Record a function entry an agent established by reading the bytes.
+   *
+   * The counterpart to `reject`. An inventory entry can start mid-instruction
+   * -- 0x50241E is the second byte of a `mov ecx, esi` -- and the enclosing
+   * function's real entry then exists nowhere in the inventory, so no rule
+   * finds it and no agent can claim it. Correcting that is work done OUTSIDE
+   * a claim, and there was no way to record the answer.
+   *
+   * The claim is CHECKED, not trusted: the address must decode, its extent
+   * must measure, and it must not overlap a function that has a proof. An
+   * agent can be wrong -- the same report said there was an unlisted function
+   * at 0x502280 when the inventory already held it.
+   */
+  recordEntry(entries: ReadonlyArray<{ readonly va: number; readonly evidence: string }>):
+    EffectGen<ReadonlyArray<{
+      readonly va: number;
+      readonly accepted: boolean;
+      readonly size: Option.Option<number>;
+      readonly refusedBecause: Option.Option<string>;
+    }>, DbError | DisasmError | SubjectIoError | SubjectParseError | DiscoveryFailed>;
+
   /** Every recorded rejection, for the subject in force. */
   rejections():
     EffectGen<ReadonlyArray<{ readonly va: number; readonly reason: string; readonly evidence: string }>, DbError | DiscoveryFailed>;

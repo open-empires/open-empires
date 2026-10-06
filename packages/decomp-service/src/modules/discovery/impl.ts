@@ -434,6 +434,39 @@ export class DiscoveryImpl
            rejected_at = excluded.rejected_at`,
         [sha, va, reason, evidence, Date.now() / 1000],
       );
+      // Derived facts ATTRIBUTED to this entry go with it.
+      //
+      // `string_references` and `global_references` record which function
+      // touched a string or a global, keyed on the containing function, and
+      // both carry a foreign key to `functions`. Rejecting an entry they
+      // reference failed outright on that key, so a misaligned entry could
+      // not be corrected at all once anything had been derived from it.
+      //
+      // Deleting them loses nothing: both are re-derived from the inventory
+      // on a timer, and against the CORRECTED inventory they will be
+      // attributed to the function that really contains those bytes. Leaving
+      // them would keep statements about a function that is being withdrawn.
+      const strings = yield* db.run(
+        'DELETE FROM string_references WHERE subject_sha = ? AND containing_function = ?',
+        [sha, va],
+      );
+      const globals = yield* db.run(
+        'DELETE FROM global_references WHERE subject_sha = ? AND containing_function = ?',
+        [sha, va],
+      );
+      // A claim on an address that is not a function cannot be worked.
+      yield* db.run(
+        'UPDATE claims SET released_at = ? WHERE va = ? AND released_at IS NULL',
+        [Date.now() / 1000, va],
+      );
+      yield* db.run('DELETE FROM near_misses WHERE subject_sha = ? AND va = ?', [sha, va]);
+      if (strings + globals > 0) {
+        console.log(
+          `[discovery] 0x${va.toString(16)} rejected; dropped ${strings} string and ` +
+            `${globals} global reference(s) attributed to it -- both are re-derived`,
+        );
+      }
+
       // The deletion is CHECKED. `accepted: true` was reported five times
       // over rows that were still in the inventory afterwards, because the
       // result of the DELETE was thrown away -- an acknowledgement that says
@@ -512,6 +545,89 @@ export class DiscoveryImpl
       ],
     );
     return { at, entries: rows.length, workable, undecodable };
+  }
+
+  *recordEntry(
+    entries: ReadonlyArray<{ readonly va: number; readonly evidence: string }>,
+  ): EffectGen<
+    ReadonlyArray<{
+      readonly va: number;
+      readonly accepted: boolean;
+      readonly size: Option.Option<number>;
+      readonly refusedBecause: Option.Option<string>;
+    }>,
+    Failure
+  > {
+    const db = this.dependencies.Db;
+    const disasm = this.dependencies.Disasm;
+    const img = yield* this.image();
+    const sha = yield* this.subjectSha();
+    const known = yield* this.inventory();
+    const out: Array<{
+      va: number;
+      accepted: boolean;
+      size: Option.Option<number>;
+      refusedBecause: Option.Option<string>;
+    }> = [];
+
+    for (const { va, evidence } of entries) {
+      const refuse = (why: string) =>
+        out.push({
+          va,
+          accepted: false,
+          size: Option.none(),
+          refusedBecause: Option.some(why),
+        });
+
+      if (va < img.textLo || va >= img.textHi) {
+        refuse(`0x${va.toString(16)} is outside the executable span`);
+        continue;
+      }
+      const existing = known.find((f) => f.va === va);
+      if (existing !== undefined) {
+        refuse(
+          `0x${va.toString(16)} is already an entry of ${existing.size} bytes; ` +
+            'use remeasure to correct its extent',
+        );
+        continue;
+      }
+      // A claimed entry inside a PROVEN function is wrong by construction:
+      // the proof established that span, and an entry inside it would make
+      // the same bytes belong to two functions.
+      const inProven = (yield* db.one(
+        `SELECT va, size FROM proven WHERE ? > va AND ? < va + size LIMIT 1`,
+        [va, va],
+      )) as { va: number; size: number } | null;
+      if (inProven !== null) {
+        refuse(
+          `0x${va.toString(16)} is inside proven function ` +
+            `0x${inProven.va.toString(16)} (${inProven.size} bytes)`,
+        );
+        continue;
+      }
+
+      const next = known.find((f) => f.va > va)?.va ?? img.textHi;
+      const extent = yield* disasm.measureExtent(img, va, next);
+      if (Option.isNone(extent)) {
+        refuse(
+          `the bytes at 0x${va.toString(16)} do not measure into an extent ` +
+            `before the next entry at 0x${next.toString(16)}`,
+        );
+        continue;
+      }
+
+      const added = yield* db.run(
+        `INSERT INTO functions(subject_sha, va, size, discovered_by)
+         VALUES (?,?,?,?) ON CONFLICT(subject_sha, va) DO NOTHING`,
+        [sha, va, Option.getOrThrow(extent), `agent: ${evidence}`.slice(0, 200)],
+      );
+      if (added === 0) {
+        refuse('the insert was refused -- the address is on the rejected list');
+        continue;
+      }
+      out.push({ va, accepted: true, size: extent, refusedBecause: Option.none() });
+    }
+    return out;
   }
 
   *rejections(): EffectGen<
