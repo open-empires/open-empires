@@ -1,15 +1,24 @@
-[submodule "packages/open-empires-web"]
-	path = packages/open-empires-web
-	url = git@github-ozyman42:open-empires/open-empires-web.git
-[submodule "packages/open-empires-backend"]
-	path = packages/open-empires-backend
-	url = git@github-ozyman42:open-empires/open-empires-backend.git
+[submodule "packages/aoe2-in-browser"]
+	path = packages/aoe2-in-browser
+	url = https://github.com/open-empires/aoe2-in-browser
 [submodule "packages/open-empires-api-bindings"]
 	path = packages/open-empires-api-bindings
-	url = git@github-ozyman42:open-empires/open-empires-api-bindings.git
+	url = https://github.com/open-empires/open-empires-api-bindings
+[submodule "packages/open-empires-backend"]
+	path = packages/open-empires-backend
+	url = https://github.com/open-empires/open-empires-backend
 [submodule "packages/open-empires-datasets"]
 	path = packages/open-empires-datasets
-	url = git@github-ozyman42:open-empires/open-empires-datasets.git
+	url = https://github.com/open-empires/open-empires-datasets
+[submodule "packages/open-empires-web"]
+	path = packages/open-empires-web
+	url = https://github.com/open-empires/open-empires-web
 [submodule "packages/openage"]
 	path = packages/openage
 	url = https://github.com/SFTtech/openage
+[submodule "packages/workflow-platform"]
+	path = packages/workflow-platform
+	url = https://github.com/jive-sh/workflow-platform
+[submodule "packages/decomp-project-image"]
+	path = packages/decomp-project-image
+	url = https://github.com/open-empires/decomp-project-image
